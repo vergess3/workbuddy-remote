@@ -1,0 +1,10 @@
+{
+  "workbuddyExePath": "",
+  "cdpPort": 9333,
+  "bridgePort": 8780,
+  "listenHost": "127.0.0.1",
+  "killWorkBuddyProcessesBeforeStart": false,
+  "showReadyWindow": false,
+  "workspaceRoots": [],
+  "maskBridgeModelSecrets": false
+}

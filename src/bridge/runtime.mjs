@@ -1,0 +1,984 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  AGENT_MANAGER_JS_PATH,
+  AUTH_LOGIN_REQUEST,
+  AUTH_LOGIN_URL_REQUEST,
+  AUTH_SESSION_CHANNEL,
+  AUTH_SESSION_REQUEST,
+  WebSocket,
+  delay,
+} from "../shared.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const RESTART_HELPER_SCRIPT_PATH = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "tools",
+  "workbuddy-restart-instance.ps1"
+);
+
+class CdpClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.ws = null;
+    this.seq = 0;
+    this.pending = new Map();
+    this.bindingHandlers = new Set();
+    this.commandTimeoutMs = 8000;
+  }
+
+  async connect() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    this.ws = new WebSocket(this.wsUrl);
+
+    await new Promise((resolve, reject) => {
+      const onOpen = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const cleanup = () => {
+        this.ws.off("open", onOpen);
+        this.ws.off("error", onError);
+      };
+      this.ws.on("open", onOpen);
+      this.ws.on("error", onError);
+    });
+
+    this.ws.on("message", (buffer) => this.#handleMessage(buffer.toString()));
+    this.ws.on("close", () => {
+      for (const { reject } of this.pending.values()) {
+        reject(new Error("CDP connection closed"));
+      }
+      this.pending.clear();
+    });
+
+    await this.send("Runtime.enable");
+    await this.send("Runtime.addBinding", {
+      name: "workbuddyBridgeNotify",
+    });
+  }
+
+  onBinding(handler) {
+    this.bindingHandlers.add(handler);
+    return () => {
+      this.bindingHandlers.delete(handler);
+    };
+  }
+
+  async send(method, params = {}) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("CDP connection closed");
+    }
+
+    const id = ++this.seq;
+    const payload = JSON.stringify({ id, method, params });
+    this.ws.send(payload);
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`));
+      }, this.commandTimeoutMs);
+
+      this.pending.set(id, {
+        method,
+        resolve: (message) => {
+          clearTimeout(timeout);
+          resolve(message);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+    });
+  }
+
+  async evaluate(expression, { awaitPromise = true, returnByValue = true } = {}) {
+    const response = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise,
+      returnByValue,
+    });
+
+    if (response.result?.exceptionDetails) {
+      const description =
+        response.result.exceptionDetails.exception?.description ||
+        response.result.exceptionDetails.text ||
+        "Runtime.evaluate failed";
+      throw new Error(description);
+    }
+
+    return response.result?.result?.value;
+  }
+
+  async ensureBridgeInjected() {
+    await this.evaluate(
+      `(() => {
+        if (globalThis.__workbuddyBridge) {
+          return "already";
+        }
+
+        const encode = (value) => {
+          if (value instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(value);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 1) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+
+            return { kind: "base64", base64: btoa(binary) };
+          }
+
+          if (ArrayBuffer.isView(value)) {
+            const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 1) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+
+            return { kind: "base64", base64: btoa(binary) };
+          }
+
+          return { kind: "json", value };
+        };
+
+        const notify = (payload) => {
+          globalThis.workbuddyBridgeNotify(JSON.stringify(payload));
+        };
+
+        const ipcListeners = new Map();
+        const ports = new Map();
+
+        globalThis.__workbuddyBridge = {
+          subscribeIpc(channel) {
+            if (ipcListeners.has(channel)) {
+              return true;
+            }
+
+            const listener = (_event, ...args) => {
+              notify({ type: "ipc-event", channel, args });
+            };
+
+            globalThis.vscode.ipcRenderer.on(channel, listener);
+            ipcListeners.set(channel, listener);
+            return true;
+          },
+
+          unsubscribeIpc(channel) {
+            const listener = ipcListeners.get(channel);
+            if (!listener) {
+              return true;
+            }
+
+            globalThis.vscode.ipcRenderer.removeListener(channel, listener);
+            ipcListeners.delete(channel);
+            return true;
+          },
+
+          openDynamicPort(windowId, nonce, portId) {
+            const readyChannel = "codebuddy:agentManagerChannelReady";
+            const errorChannel = "codebuddy:agentManagerChannelError";
+
+            const cleanup = (messageListener, errorListener) => {
+              window.removeEventListener("message", messageListener);
+              globalThis.vscode.ipcRenderer.removeListener(errorChannel, errorListener);
+            };
+
+            const errorListener = (_event, payload) => {
+              if (payload?.nonce !== nonce) {
+                return;
+              }
+
+              cleanup(messageListener, errorListener);
+              notify({
+                type: "dynamic-port-error",
+                portId,
+                nonce,
+                error: payload?.error || "Unknown error",
+              });
+            };
+
+            const messageListener = (event) => {
+              if (event.data !== nonce) {
+                return;
+              }
+
+              cleanup(messageListener, errorListener);
+
+              const port = event.ports?.[0];
+              if (!port) {
+                notify({
+                  type: "dynamic-port-error",
+                  portId,
+                  nonce,
+                  error: "No port received",
+                });
+                return;
+              }
+
+              port.start?.();
+              port.onmessage = (messageEvent) => {
+                notify({
+                  type: "port-message",
+                  portId,
+                  payload: encode(messageEvent.data),
+                });
+              };
+              port.onmessageerror = () => {
+                notify({
+                  type: "port-message-error",
+                  portId,
+                });
+              };
+
+              ports.set(portId, port);
+              notify({
+                type: "dynamic-port-ready",
+                portId,
+                nonce,
+              });
+            };
+
+            window.addEventListener("message", messageListener);
+            globalThis.vscode.ipcMessagePort.acquire(readyChannel, nonce);
+            globalThis.vscode.ipcRenderer.on(errorChannel, errorListener);
+            globalThis.vscode.ipcRenderer.send("codebuddy:requestAgentManagerChannel", windowId, nonce);
+            return true;
+          },
+
+          postPortMessage(portId, payload) {
+            const port = ports.get(portId);
+            if (!port) {
+              return false;
+            }
+
+            let data = payload?.value;
+            if (payload?.kind === "base64") {
+              const binary = atob(payload.base64);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+
+              data = bytes.buffer;
+            }
+
+            port.postMessage(data);
+            return true;
+          },
+
+          closePort(portId) {
+            const port = ports.get(portId);
+            if (!port) {
+              return true;
+            }
+
+            try {
+              port.close?.();
+            } catch {}
+
+            ports.delete(portId);
+            return true;
+          },
+        };
+
+        return "ok";
+      })()`
+    );
+  }
+
+  #handleMessage(raw) {
+    const message = JSON.parse(raw);
+
+    if (message.id && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+
+      if (message.error) {
+        pending.reject(
+          new Error(`${pending.method} failed: ${message.error.message || "Unknown CDP error"}`)
+        );
+      } else {
+        pending.resolve(message);
+      }
+
+      return;
+    }
+
+    if (message.method === "Runtime.bindingCalled") {
+      for (const handler of this.bindingHandlers) {
+        handler(message.params);
+      }
+    }
+  }
+}
+
+function isAgentManagerTarget(entry) {
+  if (entry?.type !== "page") {
+    return false;
+  }
+
+  const url = typeof entry.url === "string" ? entry.url : "";
+  const title = typeof entry.title === "string" ? entry.title.toLowerCase() : "";
+  return (
+    url.includes("agentManager.html") ||
+    title.includes("agent manager") ||
+    title.includes("agentmanager")
+  );
+}
+
+function formatTargetSummary(targets) {
+  const pages = Array.isArray(targets) ? targets.filter((entry) => entry?.type === "page") : [];
+  if (pages.length === 0) {
+    return "No page targets were reported by CDP.";
+  }
+
+  return pages
+    .slice(-6)
+    .map((entry) => {
+      const title = typeof entry.title === "string" && entry.title ? entry.title : "(untitled)";
+      const url = typeof entry.url === "string" && entry.url ? entry.url : "(no url)";
+      return `${title} -> ${url}`;
+    })
+    .join(" | ");
+}
+
+async function getAgentManagerTarget({
+  cdpHost,
+  cdpPort,
+  targetTimeoutMs = 45000,
+  pollIntervalMs = 750,
+}) {
+  const startedAt = Date.now();
+  let lastTargets = [];
+  let lastError = null;
+
+  while (Date.now() - startedAt < targetTimeoutMs) {
+    try {
+      const response = await fetch(`http://${cdpHost}:${cdpPort}/json/list`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch CDP targets: HTTP ${response.status}`);
+      }
+
+      const targets = await response.json();
+      lastTargets = Array.isArray(targets) ? targets : [];
+      const target = lastTargets.filter(isAgentManagerTarget).at(-1);
+
+      if (target?.webSocketDebuggerUrl) {
+        return target;
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+
+    await delay(pollIntervalMs);
+  }
+
+  const extra = lastError ? ` Last error: ${lastError.message}` : "";
+  throw new Error(
+    `Agent Manager target was not found within ${targetTimeoutMs}ms.` +
+      ` WorkBuddy may still be starting or may have opened a different window.` +
+      ` Visible targets: ${formatTargetSummary(lastTargets)}.${extra}`
+  );
+}
+
+class BridgeRuntime {
+  constructor(options) {
+    this.options = options;
+    this.cdp = null;
+    this.configCache = null;
+    this.authSessionCache = null;
+    this.patchedAgentManagerJs = null;
+    this.browserSockets = new Set();
+    this.channelRefCounts = new Map();
+    this.portClients = new Map();
+    this.reconnectPromise = null;
+    this.targetUrl = null;
+    this.lastTargetCheckAt = 0;
+    this.targetCheckIntervalMs = 1500;
+    this.systemChannels = new Set([AUTH_SESSION_CHANNEL]);
+  }
+
+  async initialize() {
+    await this.ensureCdpReady({ forceRefresh: true });
+    this.patchedAgentManagerJs = await this.buildPatchedAgentManagerJs();
+    await this.refreshRuntimeConfigSafe();
+    await this.refreshAuthSessionSafe();
+  }
+
+  async ensureCdpReady({ forceRefresh = false } = {}) {
+    if (this.reconnectPromise) {
+      await this.reconnectPromise;
+      return;
+    }
+
+    const currentReadyState = this.cdp?.ws?.readyState;
+    const alreadyOpen = currentReadyState === WebSocket.OPEN;
+    const shouldSkipRefresh =
+      alreadyOpen &&
+      !forceRefresh &&
+      Date.now() - this.lastTargetCheckAt < this.targetCheckIntervalMs;
+    if (shouldSkipRefresh) {
+      return;
+    }
+
+    this.reconnectPromise = (async () => {
+      const target = await getAgentManagerTarget(this.options);
+      const previousTargetUrl = this.targetUrl;
+      const shouldReplaceClient =
+        forceRefresh ||
+        !this.cdp ||
+        this.cdp.wsUrl !== target.webSocketDebuggerUrl ||
+        this.cdp.ws?.readyState === WebSocket.CLOSED ||
+        this.cdp.ws?.readyState === WebSocket.CLOSING;
+
+      if (shouldReplaceClient) {
+        this.cdp = new CdpClient(target.webSocketDebuggerUrl);
+        this.cdp.onBinding((params) => this.handleBridgeNotification(params));
+      }
+
+      await this.cdp.connect();
+      await this.cdp.ensureBridgeInjected();
+      await this.restoreSystemSubscriptions();
+      this.configCache = await this.cdp.evaluate(
+        `window.vscode.context.resolveConfiguration().then((cfg) => cfg)`
+      );
+      this.lastTargetCheckAt = Date.now();
+      this.targetUrl = target.url;
+      if (forceRefresh || shouldReplaceClient || previousTargetUrl !== target.url) {
+        console.log("[bridge] Attached Agent Manager target:", target.url);
+      }
+    })();
+
+    try {
+      await this.reconnectPromise;
+    } finally {
+      this.reconnectPromise = null;
+    }
+  }
+
+  async restoreSystemSubscriptions() {
+    for (const channel of this.systemChannels) {
+      await this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.subscribeIpc(${JSON.stringify(channel)})`
+      );
+    }
+  }
+
+  isRecoverableCdpError(error) {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+
+    const message = error.message || "";
+    return (
+      message.includes("CDP connection closed") ||
+      message.includes("Target closed") ||
+      message.includes("Session closed") ||
+      message.includes("timed out after") ||
+      message.includes("Cannot find context with specified id") ||
+      message.includes("Inspected target navigated or closed") ||
+      message.includes("No web contents for the given target id") ||
+      message.includes("Execution context was destroyed")
+    );
+  }
+
+  async withCdpRecovery(operation) {
+    await this.ensureCdpReady();
+    try {
+      return await operation();
+    } catch (error) {
+      if (!this.isRecoverableCdpError(error)) {
+        throw error;
+      }
+
+      console.warn("[bridge] Recovering from CDP error:", error.message);
+      await this.ensureCdpReady({ forceRefresh: true });
+      return operation();
+    }
+  }
+
+  getCachedRuntimeConfig() {
+    return this.configCache || {};
+  }
+
+  getCachedAuthSession() {
+    return this.authSessionCache;
+  }
+
+  cacheAuthSession(session) {
+    this.authSessionCache = session ?? null;
+    return this.authSessionCache;
+  }
+
+  isHostConnected() {
+    return this.cdp?.ws?.readyState === WebSocket.OPEN && Boolean(this.targetUrl);
+  }
+
+  getBootstrapPayload() {
+    return {
+      config: this.getCachedRuntimeConfig(),
+      authSession: this.getCachedAuthSession(),
+      hostConnected: this.isHostConnected(),
+      restartAvailable: this.canRestartCurrentApp(),
+    };
+  }
+
+  canRestartCurrentApp() {
+    return (
+      process.platform === "win32" &&
+      Boolean(this.options?.userDataDir) &&
+      Number.isInteger(this.options?.workbuddyPid) &&
+      this.options.workbuddyPid > 0 &&
+      Number.isInteger(this.options?.launcherPid) &&
+      this.options.launcherPid > 0
+    );
+  }
+
+  async refreshRuntimeConfig() {
+    const config = await this.withCdpRecovery(() =>
+      this.cdp.evaluate(`window.vscode.context.resolveConfiguration().then((cfg) => cfg)`)
+    );
+    this.configCache = config || {};
+    return this.configCache;
+  }
+
+  async refreshRuntimeConfigSafe() {
+    try {
+      return await this.refreshRuntimeConfig();
+    } catch (error) {
+      console.warn(
+        "[bridge] Failed to refresh runtime config:",
+        error instanceof Error ? error.message : String(error)
+      );
+      return this.getCachedRuntimeConfig();
+    }
+  }
+
+  async refreshAuthSession() {
+    const session = await this.invokeIpc(AUTH_SESSION_REQUEST, []);
+    return this.cacheAuthSession(session);
+  }
+
+  async refreshAuthSessionSafe() {
+    try {
+      return await this.refreshAuthSession();
+    } catch (error) {
+      console.warn(
+        "[bridge] Failed to refresh auth session:",
+        error instanceof Error ? error.message : String(error)
+      );
+      return this.getCachedAuthSession();
+    }
+  }
+
+  async buildPatchedAgentManagerJs() {
+    const source = await fs.readFile(AGENT_MANAGER_JS_PATH, "utf8");
+    const from =
+      'const d=new URL(`${h(o.appRoot,{isWindows:u.platform==="win32",scheme:"vscode-file",fallbackAuthority:"vscode-app"})}/out/`);';
+    const to =
+      'const d=globalThis.__WB_APP_OUT_BASE_URL__?new URL(globalThis.__WB_APP_OUT_BASE_URL__):new URL(`${h(o.appRoot,{isWindows:u.platform==="win32",scheme:"vscode-file",fallbackAuthority:"vscode-app"})}/out/`);';
+
+    if (!source.includes(from)) {
+      throw new Error("Unable to patch agentManager.js: bootstrap anchor not found");
+    }
+
+    return source.replace(from, to);
+  }
+
+  registerBrowserSocket(socket) {
+    this.browserSockets.add(socket);
+    socket.on("close", () => {
+      this.browserSockets.delete(socket);
+      for (const [portId, client] of this.portClients.entries()) {
+        if (client === socket) {
+          this.portClients.delete(portId);
+        }
+      }
+    });
+  }
+
+  broadcast(message) {
+    const payload = JSON.stringify(message);
+    for (const socket of this.browserSockets) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      }
+    }
+  }
+
+  sendToSocket(socket, message) {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
+    }
+  }
+
+  async invokeIpc(channel, args) {
+    const expression = `globalThis.vscode.ipcRenderer.invoke(${JSON.stringify(channel)}, ...${JSON.stringify(
+      args
+    )})`;
+    return this.withCdpRecovery(() => this.cdp.evaluate(expression));
+  }
+
+  normalizeAuthLoginUrl(loginUrlResponse) {
+    return typeof loginUrlResponse === "string" ? loginUrlResponse : loginUrlResponse?.url;
+  }
+
+  async triggerNativeAuthLogin(args) {
+    const expression = `(() => {
+      const invokeArgs = ${JSON.stringify(args || [])};
+      globalThis.vscode.ipcRenderer
+        .invoke(${JSON.stringify(AUTH_LOGIN_REQUEST)}, ...invokeArgs)
+        .then((result) => {
+          console.info("[workbuddy-bridge] Native auth login finished", result);
+        })
+        .catch((error) => {
+          console.error("[workbuddy-bridge] Native auth login failed", error);
+        });
+      return true;
+    })()`;
+
+    await this.withCdpRecovery(() => this.cdp.evaluate(expression));
+  }
+
+  async waitForAuthLoginUrl(
+    args,
+    { timeoutMs = 8000, pollIntervalMs = 200, initialDelayMs = 1200 } = {}
+  ) {
+    if (initialDelayMs > 0) {
+      await delay(initialDelayMs);
+    }
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const loginUrlResponse = await this.invokeIpc(AUTH_LOGIN_URL_REQUEST, args || []);
+      const url = this.normalizeAuthLoginUrl(loginUrlResponse);
+      if (url && typeof url === "string") {
+        return url;
+      }
+
+      await delay(pollIntervalMs);
+    }
+
+    return null;
+  }
+
+  async invokeAuthLogin(socket, args) {
+    await this.triggerNativeAuthLogin(args || []);
+    const url = await this.waitForAuthLoginUrl(args || []);
+
+    if (!url || typeof url !== "string") {
+      throw new Error("Auth login URL was not returned by WorkBuddy");
+    }
+
+    console.log("[bridge] Started native auth login and forwarded URL to browser:", url);
+    this.sendToSocket(socket, {
+      type: "open-external",
+      url,
+    });
+
+    return {
+      success: true,
+      startedNativeLogin: true,
+      openedInBrowser: true,
+      url,
+    };
+  }
+
+  async requestRestart() {
+    if (!this.canRestartCurrentApp()) {
+      throw new Error("Restart is unavailable for the current bridge session.");
+    }
+
+    const psArgs = [
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      RESTART_HELPER_SCRIPT_PATH,
+      "-CurrentBridgePid",
+      String(process.pid),
+      "-CdpPort",
+      String(this.options.cdpPort),
+      "-BridgePort",
+      String(this.options.listenPort),
+      "-UserDataDir",
+      this.options.userDataDir,
+      "-ListenHost",
+      this.options.listenHost || "127.0.0.1",
+      "-WorkBuddyPid",
+      String(this.options.workbuddyPid),
+      "-LauncherPid",
+      String(this.options.launcherPid),
+      "-LauncherParentPid",
+      String(this.options.launcherParentPid || 0),
+      "-RelaunchShell",
+      this.options.relaunchShell || "powershell",
+    ];
+
+    if (this.options.passwordHash) {
+      psArgs.push("-PasswordHash", this.options.passwordHash);
+    }
+    if (this.options.showReadyWindow) {
+      psArgs.push("-ShowReadyWindow");
+    }
+    if (this.options.openBrowser) {
+      psArgs.push("-OpenBrowser");
+    }
+
+    const quotedPsArgs = psArgs.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(", ");
+    const bootstrapArgs = [
+      "-NoProfile",
+      "-WindowStyle",
+      "Hidden",
+      "-Command",
+      `Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList @(${quotedPsArgs})`,
+    ];
+
+    spawn("powershell.exe", bootstrapArgs, {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+
+    return {
+      ok: true,
+      restarting: true,
+    };
+  }
+
+  async sendIpc(channel, args) {
+    const expression = `(() => { globalThis.vscode.ipcRenderer.send(${JSON.stringify(
+      channel
+    )}, ...${JSON.stringify(args)}); return true; })()`;
+    return this.withCdpRecovery(() => this.cdp.evaluate(expression));
+  }
+
+  async subscribeChannel(channel) {
+    const current = this.channelRefCounts.get(channel) || 0;
+    if (current === 0) {
+      await this.withCdpRecovery(() =>
+        this.cdp.evaluate(`globalThis.__workbuddyBridge.subscribeIpc(${JSON.stringify(channel)})`)
+      );
+    }
+    this.channelRefCounts.set(channel, current + 1);
+  }
+
+  async unsubscribeChannel(channel) {
+    const current = this.channelRefCounts.get(channel) || 0;
+    if (current <= 1) {
+      this.channelRefCounts.delete(channel);
+      await this.withCdpRecovery(() =>
+        this.cdp.evaluate(
+          `globalThis.__workbuddyBridge.unsubscribeIpc(${JSON.stringify(channel)})`
+        )
+      );
+      return;
+    }
+
+    this.channelRefCounts.set(channel, current - 1);
+  }
+
+  async openDynamicPort(socket, windowId, nonce, portId) {
+    this.portClients.set(portId, socket);
+    await this.withCdpRecovery(() =>
+      this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.openDynamicPort(${JSON.stringify(
+          windowId
+        )}, ${JSON.stringify(nonce)}, ${JSON.stringify(portId)})`
+      )
+    );
+  }
+
+  async postPortMessage(portId, payload) {
+    const openExternalRequest = this.extractOpenExternalRequest(payload);
+    if (openExternalRequest) {
+      this.forwardOpenExternal(portId, openExternalRequest);
+      return;
+    }
+
+    await this.withCdpRecovery(() =>
+      this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.postPortMessage(${JSON.stringify(
+          portId
+        )}, ${JSON.stringify(payload)})`
+      )
+    );
+  }
+
+  async closePort(portId) {
+    this.portClients.delete(portId);
+    await this.withCdpRecovery(() =>
+      this.cdp.evaluate(`globalThis.__workbuddyBridge.closePort(${JSON.stringify(portId)})`)
+    );
+  }
+
+  extractOpenExternalRequest(payload) {
+    if (payload?.kind !== "json") {
+      return null;
+    }
+
+    return this.findOpenExternalRequest(payload.value);
+  }
+
+  findOpenExternalRequest(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const directMatch = this.tryParseOpenExternalRequest(value);
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+      const nestedMatch = this.findOpenExternalRequest(child);
+      if (nestedMatch) {
+        return nestedMatch;
+      }
+    }
+
+    return null;
+  }
+
+  tryParseOpenExternalRequest(value) {
+    const rpcPayload =
+      value?.type === "acp-rpc" && value?.payload && typeof value.payload === "object"
+        ? value.payload
+        : value;
+
+    if (rpcPayload?.method === "__backend__") {
+      const backendMatch = this.extractBackendOpenExternal(rpcPayload.params);
+      if (backendMatch) {
+        return {
+          ...backendMatch,
+          rpcId: rpcPayload.id,
+        };
+      }
+    }
+
+    return this.extractBackendOpenExternal(value);
+  }
+
+  extractBackendOpenExternal(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    if (value.type === "backend:open-external") {
+      const url = value.params?.url ?? value.url;
+      if (typeof url === "string" && url) {
+        return {
+          url,
+          backendRequestId: value.requestId,
+        };
+      }
+    }
+
+    if (value.type === "backend" && value.params && typeof value.params === "object") {
+      const nested = value.params;
+      if (nested.type === "backend:open-external") {
+        const url = nested.params?.url ?? nested.url;
+        if (typeof url === "string" && url) {
+          return {
+            url,
+            backendRequestId: value.requestId ?? nested.requestId,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  buildOpenExternalResult(request) {
+    if (request?.rpcId !== undefined) {
+      return {
+        type: "acp-rpc",
+        payload: {
+          jsonrpc: "2.0",
+          id: request.rpcId,
+          result: {
+            success: true,
+          },
+        },
+      };
+    }
+
+    return {
+      success: true,
+      requestId: request?.backendRequestId,
+    };
+  }
+
+  forwardOpenExternal(portId, request) {
+    const socket = this.portClients.get(portId);
+    if (!socket) {
+      return;
+    }
+
+    console.log("[bridge] Forwarding openExternal to browser:", request.url);
+    this.sendToSocket(socket, {
+      type: "open-external",
+      url: request.url,
+    });
+    this.sendToSocket(socket, {
+      type: "port-message",
+      portId,
+      payload: encodePayloadForTransport(this.buildOpenExternalResult(request)),
+    });
+  }
+
+  handleBridgeNotification(params) {
+    let payload;
+    try {
+      payload = JSON.parse(params.payload);
+    } catch (error) {
+      console.error("[bridge] Failed to parse binding payload:", error);
+      return;
+    }
+
+    if (payload.type === "dynamic-port-ready") {
+      const socket = this.portClients.get(payload.portId);
+      if (socket) {
+        this.sendToSocket(socket, payload);
+      }
+      return;
+    }
+
+    if (payload.type === "dynamic-port-error") {
+      const socket = this.portClients.get(payload.portId);
+      if (socket) {
+        this.sendToSocket(socket, payload);
+      }
+      return;
+    }
+
+    if (payload.type === "port-message" || payload.type === "port-message-error") {
+      const socket = this.portClients.get(payload.portId);
+      if (socket) {
+        this.sendToSocket(socket, payload);
+      }
+      return;
+    }
+
+    if (payload.type === "ipc-event") {
+      if (payload.channel === AUTH_SESSION_CHANNEL) {
+        this.cacheAuthSession(payload.args?.[0]);
+      }
+      this.broadcast(payload);
+    }
+  }
+}
+
+export { CdpClient, BridgeRuntime, getAgentManagerTarget };

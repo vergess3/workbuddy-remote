@@ -1,0 +1,17 @@
+*.log
+*.err.log
+*.tmp
+Thumbs.db
+.DS_Store
+
+.playwright/
+.playwright-cli/
+output/
+
+tmp/
+node_modules/
+dist/
+coverage/
+
+patches/_main.original.js
+patches/_main.current.js
