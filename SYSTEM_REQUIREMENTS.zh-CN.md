@@ -4,7 +4,7 @@
 
 ## 支持的环境
 
-- 操作系统：Windows 10 或 Windows 11
+- 操作系统：Windows 10+ 或 Windows Server 2016+
 - Shell：Windows PowerShell 5.1 或更高版本
 - 运行时：Node.js 18 或更高版本
 - 推荐运行时：Node.js 20 LTS 或更高版本
