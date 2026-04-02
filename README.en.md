@@ -27,6 +27,9 @@ Key requirements:
 
 ## Quick Start
 
+> **Installation Tip**: Clone this repository into your WorkBuddy directory, preferably under the `tools` folder (e.g., `C:\Apps\WorkBuddy\tools\workbuddy-remote\`) for easier path management and maintenance.
+
+
 ### Option 1: Double-click launch
 
 Run:
@@ -39,7 +42,6 @@ What it does:
 
 - Hides the PowerShell window
 - Starts WorkBuddy and the bridge automatically
-- Optionally opens a ready window with clickable and copyable access URLs for the current listen host when enabled in config
 
 ### Option 2: Launch from PowerShell
 
