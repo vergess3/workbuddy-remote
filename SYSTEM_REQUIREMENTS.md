@@ -2,7 +2,7 @@
 
 ## Supported Environment
 
-- OS: Windows 10 or Windows 11
+- OS: Windows 10+ or Windows Server 2016+
 - Shell: Windows PowerShell 5.1 or newer
 - Runtime: Node.js 18 or newer
 - Recommended runtime: Node.js 20 LTS or newer
