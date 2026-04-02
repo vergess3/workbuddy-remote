@@ -44,7 +44,6 @@ start-workbuddy-remote.vbs
 
 - 隐藏 PowerShell 窗口
 - 自动启动 WorkBuddy 和 bridge
-- 弹出就绪窗口，显示当前可访问地址，可直接点击或复制
 
 ### 方式 2：PowerShell 启动
 
