@@ -1,5 +1,4 @@
-# WorkBuddy Remote Bridge
-
+# WorkBuddy Remote
 [中文说明](./README.md)
 
 This project exposes Tencent `WorkBuddy` running on a Windows host as a browser-accessible web UI. You can remotely access WorkBuddy from anywhere on a desktop, tablet, or phone with just a browser, without preinstalling any extra app.
@@ -10,7 +9,7 @@ This project exposes Tencent `WorkBuddy` running on a Windows host as a browser-
 - Access it directly from desktops, tablets, phones, and other devices without installing a dedicated client
 - Keep WorkBuddy running 24/7 on an old PC or a cloud server so your work does not stop when you shut down your daily machine
 - Run WorkBuddy on a machine or cloud server you fully control and isolate it from your local files to reduce information leakage and uncontrolled operations such as accidental file deletion
-- Provide a more user-friendly and lower-barrier file management workflow through the built-in WorkBuddy-Remote file manager, remote login to the server, or direct operation on the host machine
+- Provide a more user-friendly and lower-barrier file management workflow through the built-in file manager, remote login to the server, or direct operation on the host machine
 - Reduce the resource load on your work computer by reusing an old PC or borrowing cloud compute
 - Keep the built-in strengths of WorkBuddy itself, including Tencent ecosystem integration and one-click connection to WeChat
 
