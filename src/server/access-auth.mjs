@@ -243,7 +243,12 @@ class BridgeAccessAuth {
   }
 
   shouldBypass(pathname) {
-    return pathname === "/healthz" || pathname === LOGIN_PATH || pathname === LOGOUT_PATH;
+    return (
+      pathname === "/healthz" ||
+      pathname === "/readyz" ||
+      pathname === LOGIN_PATH ||
+      pathname === LOGOUT_PATH
+    );
   }
 
   getSession(req) {

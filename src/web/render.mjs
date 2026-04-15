@@ -1,7 +1,6 @@
 ﻿import { AUTH_LOGIN_REQUEST, AUTH_SESSION_CHANNEL, AUTH_SESSION_REQUEST, PICK_FOLDER_REQUEST } from "../shared.mjs";
 
-function renderAgentManagerHtml() {
-  const assetVersion = Date.now().toString(36);
+function renderAgentManagerHtml(assetVersion) {
   return `<!DOCTYPE html>
 <html>
   <head>
@@ -1871,7 +1870,7 @@ function renderShimJs() {
       }
 
       try {
-        const response = await fetch("/healthz?restart=" + Date.now(), {
+        const response = await fetch("/readyz?restart=" + Date.now(), {
           cache: "no-store",
         });
         if (response.ok) {
@@ -2690,35 +2689,50 @@ function renderShimJs() {
   };
 
   const connect = async () => {
-    try {
-      const bootstrap = await fetch("/bridge/bootstrap", { cache: "no-store" }).then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to load bridge bootstrap");
-        }
-        return response.json();
+    const bootstrapPromise = fetch("/bridge/bootstrap", { cache: "no-store" }).then((response) => {
+      if (!response.ok) {
+        throw new Error("Failed to load bridge bootstrap");
+      }
+      return response.json();
+    });
+
+    const openBridgeWs = async () => {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(\`\${protocol}//\${location.host}/bridge/ws\`);
+      await new Promise((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", () => reject(new Error("WebSocket connect failed")), {
+          once: true,
+        });
       });
-      applyBootstrap(bootstrap);
+    };
+
+    const bootstrapResultPromise = Promise.allSettled([bootstrapPromise]);
+    const wsPromise = openBridgeWs();
+
+    try {
+      await wsPromise;
     } catch (error) {
-      console.warn("[bridge] Falling back to cached bootstrap data", error);
+      throw error;
+    }
+
+    const [bootstrapResult] = await bootstrapResultPromise;
+    if (bootstrapResult?.status === "fulfilled") {
+      applyBootstrap(bootstrapResult.value);
+    } else {
+      console.warn("[bridge] Falling back to cached bootstrap data", bootstrapResult?.reason);
       runtimeConfig = {};
       bridgeUiConfig = {};
+      hostConnected = false;
       saveAuthSession(loadStoredAuthSession());
-        setBridgeStatus(t("bootstrapUnavailable"));
+      setBridgeStatus(t("bootstrapUnavailable"));
     }
 
     globalThis.__WB_APP_OUT_BASE_URL__ = new URL("/mirror/resources/app/out/", location.origin).href;
 
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(\`\${protocol}//\${location.host}/bridge/ws\`);
-    await new Promise((resolve, reject) => {
-      socket.addEventListener("open", () => resolve(), { once: true });
-      socket.addEventListener("error", () => reject(new Error("WebSocket connect failed")), {
-        once: true,
-      });
-    });
-
-    hostConnected = true;
-    setBridgeStatus("");
+    if (hostConnected) {
+      setBridgeStatus("");
+    }
 
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
@@ -2792,6 +2806,7 @@ function renderShimJs() {
     });
 
     socket.addEventListener("close", () => {
+      hostConnected = false;
       setBridgeStatus(restartInProgress ? t("restartStarting") : t("hostConnectionClosed"));
       for (const { reject } of pending.values()) {
         reject(new Error("Bridge WebSocket closed"));
@@ -2800,6 +2815,7 @@ function renderShimJs() {
     });
 
     socket.addEventListener("error", () => {
+      hostConnected = false;
       setBridgeStatus(restartInProgress ? t("restartStarting") : t("hostConnectionFailed"));
     });
   };

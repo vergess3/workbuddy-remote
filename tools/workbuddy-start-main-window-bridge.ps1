@@ -415,7 +415,7 @@ try {
     $bridgeLog = Join-Path $tmpDir "bridge-$BridgePort.log"
     $bridgeErr = Join-Path $tmpDir "bridge-$BridgePort.err.log"
     $primaryAccessHost = if ($normalizedListenHost -eq "0.0.0.0") { "127.0.0.1" } else { $ListenHost }
-    $healthUrl = "http://$primaryAccessHost`:$BridgePort/healthz"
+    $healthUrl = "http://$primaryAccessHost`:$BridgePort/readyz"
     $primaryUrl = "http://$primaryAccessHost`:$BridgePort/agent-manager/"
 
     if (-not (Test-Path $UserDataDir)) {

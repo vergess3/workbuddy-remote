@@ -1,12 +1,13 @@
 import http from "node:http";
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { promises as fs, createReadStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import zlib from "node:zlib";
 
 import {
   APP_ROOT,
   AUTH_LOGIN_REQUEST,
   NO_STORE_CACHE_CONTROL,
-  STATIC_CACHE_CONTROL,
   WebSocketServer,
   contentTypeFor,
   getLanUrls,
@@ -25,7 +26,140 @@ import {
   uploadWorkspaceFile,
 } from "../workspace/service.mjs";
 import { loadBridgeUiConfig } from "../config.mjs";
-import { renderAgentManagerHtml, renderShimJs } from "../web/render.mjs";
+import { renderAgentManagerHtml } from "../web/render.mjs";
+
+const HTML_CACHE_CONTROL = "no-cache";
+const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const REVALIDATED_STATIC_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+const COMPRESSIBLE_EXTENSIONS = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg"]);
+
+function isCompressibleAsset(filePath) {
+  return COMPRESSIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function createWeakEtag(stats) {
+  return `W/"${stats.size}-${Math.trunc(stats.mtimeMs)}"`;
+}
+
+function pickContentEncoding(req) {
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  if (acceptEncoding.includes("br")) {
+    return "br";
+  }
+  if (acceptEncoding.includes("gzip")) {
+    return "gzip";
+  }
+  return null;
+}
+
+function isEtagMatch(req, etag) {
+  const header = req.headers["if-none-match"];
+  if (!header) {
+    return false;
+  }
+  return String(header)
+    .split(",")
+    .map((value) => value.trim())
+    .includes(etag);
+}
+
+function isModifiedSinceMatch(req, stats) {
+  const header = req.headers["if-modified-since"];
+  if (!header) {
+    return false;
+  }
+
+  const parsed = Date.parse(String(header));
+  if (Number.isNaN(parsed)) {
+    return false;
+  }
+
+  return Math.trunc(stats.mtimeMs / 1000) <= Math.trunc(parsed / 1000);
+}
+
+function writeNotModified(res, headers = {}) {
+  res.writeHead(304, headers);
+  res.end();
+}
+
+function writeBuffer(res, statusCode, body, headers) {
+  res.writeHead(statusCode, {
+    ...headers,
+    "Content-Length": body.byteLength,
+  });
+  res.end(body);
+}
+
+async function sendStaticAsset(req, res, filePath, stats, cacheControl) {
+  const contentType = contentTypeFor(filePath);
+  const etag = createWeakEtag(stats);
+  const lastModified = stats.mtime.toUTCString();
+  const baseHeaders = {
+    "Content-Type": contentType,
+    "Cache-Control": cacheControl,
+    ETag: etag,
+    "Last-Modified": lastModified,
+  };
+
+  if (isEtagMatch(req, etag) || isModifiedSinceMatch(req, stats)) {
+    writeNotModified(res, baseHeaders);
+    return;
+  }
+
+  const encoding = isCompressibleAsset(filePath) ? pickContentEncoding(req) : null;
+  if (!encoding) {
+    res.writeHead(200, {
+      ...baseHeaders,
+      "Content-Length": stats.size,
+    });
+    await pipeline(createReadStream(filePath), res);
+    return;
+  }
+
+  const compressor =
+    encoding === "br"
+      ? zlib.createBrotliCompress()
+      : zlib.createGzip({ level: zlib.constants.Z_BEST_SPEED });
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    "Content-Encoding": encoding,
+    Vary: "Accept-Encoding",
+  });
+  await pipeline(createReadStream(filePath), compressor, res);
+}
+
+function sendVersionedScript(req, res, payload, { etag, cacheControl }) {
+  const body = Buffer.from(payload, "utf8");
+  const contentType = "application/javascript; charset=utf-8";
+  const baseHeaders = {
+    "Content-Type": contentType,
+    "Cache-Control": cacheControl,
+    ETag: etag,
+  };
+
+  if (isEtagMatch(req, etag)) {
+    writeNotModified(res, baseHeaders);
+    return;
+  }
+
+  const encoding = pickContentEncoding(req);
+  if (!encoding) {
+    writeBuffer(res, 200, body, baseHeaders);
+    return;
+  }
+
+  const encodedBody =
+    encoding === "br"
+      ? zlib.brotliCompressSync(body)
+      : zlib.gzipSync(body, { level: zlib.constants.Z_BEST_SPEED });
+
+  writeBuffer(res, 200, encodedBody, {
+    ...baseHeaders,
+    "Content-Encoding": encoding,
+    Vary: "Accept-Encoding",
+  });
+}
 
 function isLoopbackHost(host) {
   const value = String(host || "").trim().toLowerCase();
@@ -64,6 +198,15 @@ function createRequestHandler(runtime, auth) {
 
       if (requestUrl.pathname === "/healthz") {
         json(res, 200, { ok: true });
+        return;
+      }
+
+      if (requestUrl.pathname === "/readyz") {
+        const ready = runtime.isHostConnected();
+        json(res, ready ? 200 : 503, {
+          ok: ready,
+          hostConnected: ready,
+        });
         return;
       }
 
@@ -164,27 +307,29 @@ function createRequestHandler(runtime, auth) {
       }
 
       if (requestUrl.pathname === "/bridge/vscode-shim.js") {
-        text(
-          res,
-          200,
-          renderShimJs(),
-          "application/javascript; charset=utf-8"
-        );
+        sendVersionedScript(req, res, runtime.getShimJs(), {
+          etag: `"shim-${runtime.getAssetVersion()}"`,
+          cacheControl: IMMUTABLE_CACHE_CONTROL,
+        });
         return;
       }
 
       if (requestUrl.pathname === "/bridge/agentManager.patched.js") {
-        text(
-          res,
-          200,
-          runtime.patchedAgentManagerJs,
-          "application/javascript; charset=utf-8"
-        );
+        sendVersionedScript(req, res, runtime.getPatchedAgentManagerJs(), {
+          etag: `"agent-manager-${runtime.getAssetVersion()}"`,
+          cacheControl: IMMUTABLE_CACHE_CONTROL,
+        });
         return;
       }
 
       if (requestUrl.pathname === "/agent-manager/" || requestUrl.pathname === "/agent-manager") {
-        text(res, 200, renderAgentManagerHtml(), "text/html; charset=utf-8");
+        text(
+          res,
+          200,
+          renderAgentManagerHtml(runtime.getAssetVersion()),
+          "text/html; charset=utf-8",
+          HTML_CACHE_CONTROL
+        );
         return;
       }
 
@@ -198,13 +343,18 @@ function createRequestHandler(runtime, auth) {
           return;
         }
 
-        const file = await fs.readFile(normalized);
-        res.writeHead(200, {
-          "Content-Type": contentTypeFor(normalized),
-          "Cache-Control": STATIC_CACHE_CONTROL,
-          "Content-Length": file.byteLength,
-        });
-        res.end(file);
+        const stats = await fs.stat(normalized);
+        if (!stats.isFile()) {
+          json(res, 404, { error: "Not found" });
+          return;
+        }
+
+        const cacheControl =
+          requestUrl.searchParams.get("v") === runtime.getAssetVersion()
+            ? IMMUTABLE_CACHE_CONTROL
+            : REVALIDATED_STATIC_CACHE_CONTROL;
+
+        await sendStaticAsset(req, res, normalized, stats, cacheControl);
         return;
       }
 

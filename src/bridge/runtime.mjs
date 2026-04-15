@@ -1,8 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
+  APP_ROOT,
   AGENT_MANAGER_JS_PATH,
   AUTH_LOGIN_REQUEST,
   AUTH_LOGIN_URL_REQUEST,
@@ -11,6 +13,7 @@ import {
   WebSocket,
   delay,
 } from "../shared.mjs";
+import { renderShimJs } from "../web/render.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RESTART_HELPER_SCRIPT_PATH = path.resolve(
@@ -20,6 +23,17 @@ const RESTART_HELPER_SCRIPT_PATH = path.resolve(
   "tools",
   "workbuddy-restart-instance.ps1"
 );
+const MAIN_CSS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.css");
+const TARGET_CACHE_FILE_NAME = "workbuddy-remote-target-cache.json";
+
+function createHashVersion(parts) {
+  const hash = crypto.createHash("sha256");
+  for (const part of parts) {
+    hash.update(part);
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 16);
+}
 
 class CdpClient {
   constructor(wsUrl) {
@@ -408,13 +422,150 @@ class BridgeRuntime {
     this.lastTargetCheckAt = 0;
     this.targetCheckIntervalMs = 1500;
     this.systemChannels = new Set([AUTH_SESSION_CHANNEL]);
+    this.warmupPromise = null;
+    this.shimJs = null;
+    this.assetVersion = "";
   }
 
   async initialize() {
-    await this.ensureCdpReady({ forceRefresh: true });
-    this.patchedAgentManagerJs = await this.buildPatchedAgentManagerJs();
-    await this.refreshRuntimeConfigSafe();
-    await this.refreshAuthSessionSafe();
+    await this.prepareWebAssets();
+    await this.warmup();
+  }
+
+  async prepareWebAssets() {
+    if (this.patchedAgentManagerJs && this.shimJs && this.assetVersion) {
+      return;
+    }
+
+    const [patchedAgentManagerJs, mainCss, shimJs] = await Promise.all([
+      this.buildPatchedAgentManagerJs(),
+      fs.readFile(MAIN_CSS_PATH, "utf8"),
+      Promise.resolve(renderShimJs()),
+    ]);
+
+    this.patchedAgentManagerJs = patchedAgentManagerJs;
+    this.shimJs = shimJs;
+    this.assetVersion = createHashVersion([mainCss, shimJs, patchedAgentManagerJs]);
+  }
+
+  async warmup() {
+    if (this.warmupPromise) {
+      return this.warmupPromise;
+    }
+
+    this.warmupPromise = (async () => {
+      await this.ensureCdpReady({ forceRefresh: true });
+      await this.refreshRuntimeConfigSafe();
+      await this.refreshAuthSessionSafe();
+    })();
+
+    try {
+      await this.warmupPromise;
+    } finally {
+      this.warmupPromise = null;
+    }
+  }
+
+  getAssetVersion() {
+    return this.assetVersion;
+  }
+
+  getShimJs() {
+    return this.shimJs || "";
+  }
+
+  getPatchedAgentManagerJs() {
+    return this.patchedAgentManagerJs || "";
+  }
+
+  getTargetCachePath() {
+    if (!this.options?.userDataDir) {
+      return null;
+    }
+    return path.join(this.options.userDataDir, TARGET_CACHE_FILE_NAME);
+  }
+
+  async loadCachedTarget() {
+    const cachePath = this.getTargetCachePath();
+    if (!cachePath) {
+      return null;
+    }
+
+    try {
+      const raw = await fs.readFile(cachePath, "utf8");
+      const cached = JSON.parse(raw);
+      if (
+        !cached ||
+        typeof cached.webSocketDebuggerUrl !== "string" ||
+        !cached.webSocketDebuggerUrl ||
+        cached.cdpPort !== this.options?.cdpPort ||
+        cached.cdpHost !== this.options?.cdpHost
+      ) {
+        return null;
+      }
+      return cached;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return null;
+      }
+      console.warn(
+        "[bridge] Failed to read cached Agent Manager target:",
+        error instanceof Error ? error.message : String(error)
+      );
+      return null;
+    }
+  }
+
+  async saveCachedTarget(target) {
+    const cachePath = this.getTargetCachePath();
+    if (!cachePath || !target?.webSocketDebuggerUrl) {
+      return;
+    }
+
+    const payload = {
+      cdpHost: this.options?.cdpHost,
+      cdpPort: this.options?.cdpPort,
+      webSocketDebuggerUrl: target.webSocketDebuggerUrl,
+      url: target.url || "",
+      title: target.title || "",
+      savedAt: new Date().toISOString(),
+    };
+
+    try {
+      await fs.mkdir(path.dirname(cachePath), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(payload, null, 2), "utf8");
+    } catch (error) {
+      console.warn(
+        "[bridge] Failed to persist cached Agent Manager target:",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  async resolveAgentManagerTarget() {
+    const cachedTarget = await this.loadCachedTarget();
+    if (cachedTarget) {
+      try {
+        const cachedClient = new CdpClient(cachedTarget.webSocketDebuggerUrl);
+        await cachedClient.connect();
+        return {
+          target: cachedTarget,
+          client: cachedClient,
+          fromCache: true,
+        };
+      } catch (error) {
+        console.warn(
+          "[bridge] Cached Agent Manager target is no longer usable:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
+    return {
+      target: await getAgentManagerTarget(this.options),
+      client: null,
+      fromCache: false,
+    };
   }
 
   async ensureCdpReady({ forceRefresh = false } = {}) {
@@ -434,7 +585,7 @@ class BridgeRuntime {
     }
 
     this.reconnectPromise = (async () => {
-      const target = await getAgentManagerTarget(this.options);
+      const { target, client, fromCache } = await this.resolveAgentManagerTarget();
       const previousTargetUrl = this.targetUrl;
       const shouldReplaceClient =
         forceRefresh ||
@@ -444,8 +595,10 @@ class BridgeRuntime {
         this.cdp.ws?.readyState === WebSocket.CLOSING;
 
       if (shouldReplaceClient) {
-        this.cdp = new CdpClient(target.webSocketDebuggerUrl);
+        this.cdp = client || new CdpClient(target.webSocketDebuggerUrl);
         this.cdp.onBinding((params) => this.handleBridgeNotification(params));
+      } else if (client?.ws && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.close();
       }
 
       await this.cdp.connect();
@@ -456,8 +609,10 @@ class BridgeRuntime {
       );
       this.lastTargetCheckAt = Date.now();
       this.targetUrl = target.url;
+      await this.saveCachedTarget(target);
       if (forceRefresh || shouldReplaceClient || previousTargetUrl !== target.url) {
-        console.log("[bridge] Attached Agent Manager target:", target.url);
+        const sourceLabel = fromCache ? "cached target" : "discovered target";
+        console.log("[bridge] Attached Agent Manager target:", target.url, `(${sourceLabel})`);
       }
     })();
 
