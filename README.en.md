@@ -74,6 +74,8 @@ Example:
 ```json
 {
   "workbuddyExePath": "C:\\Apps\\WorkBuddy\\WorkBuddy.exe",
+  "workbuddyUserDataDir": "D:\\WorkBuddyData",
+  "runtimeRootDir": "D:\\workbuddy-remote-runtime",
   "cdpPort": 9333,
   "bridgePort": 8780,
   "listenHost": "127.0.0.1",
@@ -86,7 +88,9 @@ Example:
 
 Field notes:
 
-- `workbuddyExePath`: optional absolute path to `WorkBuddy.exe`; when empty, the launcher still searches upward from this project directory
+- `workbuddyExePath`: optional absolute path to `WorkBuddy.exe`; when empty, the launcher first looks for `WorkBuddy\\WorkBuddy.exe` beside `workbuddy-remote`
+- `workbuddyUserDataDir`: optional `--user-data-dir` passed to WorkBuddy; when empty, the default is `workbuddy-remote\\output\\runtime\\workbuddy-user-data`
+- `runtimeRootDir`: optional runtime directory for bridge logs, cache, and temp files; when empty, the default is `workbuddy-remote\\output\\runtime`
 - `cdpPort`: default CDP port for the launcher scripts
 - `bridgePort`: default HTTP/WebSocket port for the bridge launcher
 - `listenHost`: default bind host for the bridge launcher
@@ -94,6 +98,8 @@ Field notes:
 - `showReadyWindow`: whether to show the `WorkBuddy Remote Ready` popup after startup; defaults to `false`
 - `workspaceRoots`: optional list of allowed workspace root folders; when empty, the default is `C:\Users\<current-user>\WBWorkspaces`
 - `maskBridgeModelSecrets`: whether to hide the API address and API key inputs in the WorkBuddy-Remote browser page
+
+The launcher no longer writes bridge temp files or logs into the WorkBuddy installation directory by default.
 
 Command-line flags still take precedence over the config file. For example, `-CdpPort`, `-BridgePort`, and `-ListenHost` continue to work exactly as before, but the config file is the default-value source when those flags are omitted.
 

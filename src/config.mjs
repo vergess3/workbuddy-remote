@@ -7,6 +7,8 @@ const CONFIG_FILE_PATH = path.resolve(__dirname, "..", "workbuddy-remote.config.
 
 const DEFAULT_CONFIG = Object.freeze({
   workbuddyExePath: "",
+  workbuddyUserDataDir: "",
+  runtimeRootDir: "",
   cdpPort: 9333,
   bridgePort: 8780,
   listenHost: "127.0.0.1",
@@ -79,6 +81,8 @@ async function loadConfig() {
   const raw = JSON.parse(await readConfigFile());
   return {
     workbuddyExePath: normalizeString(raw?.workbuddyExePath),
+    workbuddyUserDataDir: normalizeString(raw?.workbuddyUserDataDir),
+    runtimeRootDir: normalizeString(raw?.runtimeRootDir),
     cdpPort: normalizePort(raw?.cdpPort, DEFAULT_CONFIG.cdpPort),
     bridgePort: normalizePort(raw?.bridgePort, DEFAULT_CONFIG.bridgePort),
     listenHost: normalizeString(raw?.listenHost) || DEFAULT_CONFIG.listenHost,

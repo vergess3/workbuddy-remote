@@ -9,6 +9,15 @@ function Get-WorkBuddyRemoteProjectRoot {
     return (Resolve-Path -LiteralPath (Join-Path $ScriptDir "..")).Path
 }
 
+function Get-WorkBuddyRemoteProjectParent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptDir
+    )
+
+    return Split-Path -Parent (Get-WorkBuddyRemoteProjectRoot -ScriptDir $ScriptDir)
+}
+
 function Get-WorkBuddyRemoteConfigPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -40,6 +49,24 @@ function Get-WorkBuddyRemoteConfig {
     catch {
         throw "Failed to parse config file: $configPath"
     }
+}
+
+function Resolve-WorkBuddyRemotePathValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue
+    )
+
+    $projectRoot = Get-WorkBuddyRemoteProjectRoot -ScriptDir $ScriptDir
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($PathValue)
+    if (-not [System.IO.Path]::IsPathRooted($expandedPath)) {
+        $expandedPath = Join-Path $projectRoot $expandedPath
+    }
+
+    return [System.IO.Path]::GetFullPath($expandedPath)
 }
 
 function Get-WorkBuddyRemoteConfigString {
@@ -124,6 +151,52 @@ function Get-WorkBuddyRemoteConfigBool {
     return $Fallback
 }
 
+function Get-WorkBuddyRemoteRuntimeRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptDir,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Config
+    )
+
+    $configuredPath = Get-WorkBuddyRemoteConfigString -Config $Config -Name "runtimeRootDir"
+    if ($configuredPath) {
+        return Resolve-WorkBuddyRemotePathValue -ScriptDir $ScriptDir -PathValue $configuredPath
+    }
+
+    return Join-Path (Get-WorkBuddyRemoteProjectRoot -ScriptDir $ScriptDir) "output\runtime"
+}
+
+function Get-WorkBuddyRemoteTempDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptDir,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Config
+    )
+
+    return Join-Path (Get-WorkBuddyRemoteRuntimeRoot -ScriptDir $ScriptDir -Config $Config) "temp"
+}
+
+function Get-WorkBuddyDefaultUserDataDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptDir,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Config
+    )
+
+    $configuredPath = Get-WorkBuddyRemoteConfigString -Config $Config -Name "workbuddyUserDataDir"
+    if ($configuredPath) {
+        return Resolve-WorkBuddyRemotePathValue -ScriptDir $ScriptDir -PathValue $configuredPath
+    }
+
+    return Join-Path (Get-WorkBuddyRemoteRuntimeRoot -ScriptDir $ScriptDir -Config $Config) "workbuddy-user-data"
+}
+
 function Find-UpwardFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -166,18 +239,37 @@ function Find-WorkBuddyExecutable {
 
     $configuredPath = Get-WorkBuddyRemoteConfigString -Config $Config -Name "workbuddyExePath"
     if ($configuredPath) {
-        $projectRoot = Get-WorkBuddyRemoteProjectRoot -ScriptDir $ScriptDir
-        $expandedPath = [Environment]::ExpandEnvironmentVariables($configuredPath)
-        if (-not [System.IO.Path]::IsPathRooted($expandedPath)) {
-            $expandedPath = Join-Path $projectRoot $expandedPath
-        }
-
-        $resolvedPath = [System.IO.Path]::GetFullPath($expandedPath)
+        $resolvedPath = Resolve-WorkBuddyRemotePathValue -ScriptDir $ScriptDir -PathValue $configuredPath
         if (-not (Test-Path -LiteralPath $resolvedPath)) {
             throw "Configured WorkBuddy executable path not found: $resolvedPath"
         }
 
         return $resolvedPath
+    }
+
+    $projectParent = Get-WorkBuddyRemoteProjectParent -ScriptDir $ScriptDir
+    $siblingCandidates = @(
+        (Join-Path $projectParent "WorkBuddy\WorkBuddy.exe"),
+        (Join-Path $projectParent "workbuddy\WorkBuddy.exe")
+    )
+
+    foreach ($candidate in $siblingCandidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    try {
+        $siblingDirectories = Get-ChildItem -LiteralPath $projectParent -Directory -ErrorAction Stop |
+            Where-Object { $_.Name -ine "workbuddy-remote" -and $_.Name -match "workbuddy" }
+        foreach ($directory in $siblingDirectories) {
+            $candidate = Join-Path $directory.FullName "WorkBuddy.exe"
+            if (Test-Path -LiteralPath $candidate) {
+                return [System.IO.Path]::GetFullPath($candidate)
+            }
+        }
+    }
+    catch {
     }
 
     $exePath = Find-UpwardFile -StartDir $ScriptDir -FileName "WorkBuddy.exe" -MaxLevels $MaxLevels

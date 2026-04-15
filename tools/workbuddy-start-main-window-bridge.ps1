@@ -34,7 +34,7 @@ if (-not $PSBoundParameters.ContainsKey("BridgePort")) {
     $BridgePort = Get-WorkBuddyRemoteConfigInt -Config $config -Name "bridgePort" -Fallback 8780
 }
 if (-not $PSBoundParameters.ContainsKey("UserDataDir") -or [string]::IsNullOrWhiteSpace($UserDataDir)) {
-    $UserDataDir = Join-Path $env:APPDATA "WorkBuddy"
+    $UserDataDir = Get-WorkBuddyDefaultUserDataDir -ScriptDir $scriptDir -Config $config
 }
 if (-not $PSBoundParameters.ContainsKey("ListenHost") -or [string]::IsNullOrWhiteSpace($ListenHost)) {
     $configuredListenHost = Get-WorkBuddyRemoteConfigString -Config $config -Name "listenHost"
@@ -407,8 +407,9 @@ function Show-ReadyWindow {
 
 try {
     $exePath = Find-WorkBuddyExecutable -ScriptDir $scriptDir -Config $config
-    $rootDir = Split-Path -Parent $exePath
-    $tmpDir = Join-Path $rootDir "tmp"
+    $runtimeRoot = Get-WorkBuddyRemoteRuntimeRoot -ScriptDir $scriptDir -Config $config
+    $tmpDir = Get-WorkBuddyRemoteTempDir -ScriptDir $scriptDir -Config $config
+    New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
     $bridgeScript = Join-Path $scriptDir "workbuddy-agentmanager-bridge.mjs"
