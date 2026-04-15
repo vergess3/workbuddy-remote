@@ -7,7 +7,39 @@ import { createRequire } from "node:module";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function normalizeExistingAppRoot(candidatePath) {
+  if (!candidatePath || typeof candidatePath !== "string") {
+    return null;
+  }
+
+  const normalized = path.resolve(candidatePath);
+  if (existsSync(path.join(normalized, "package.json"))) {
+    return normalized;
+  }
+
+  const nestedApp = path.join(normalized, "resources", "app");
+  if (existsSync(path.join(nestedApp, "package.json"))) {
+    return nestedApp;
+  }
+
+  return null;
+}
+
 function findAppRoot(startDir, maxLevels = 8) {
+  const envCandidates = [
+    process.env.WORKBUDDY_APP_ROOT,
+    process.env.WORKBUDDY_EXE_PATH
+      ? path.dirname(process.env.WORKBUDDY_EXE_PATH)
+      : "",
+  ];
+
+  for (const candidate of envCandidates) {
+    const resolved = normalizeExistingAppRoot(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
   let currentDir = startDir;
   for (let level = 0; level <= maxLevels; level += 1) {
     const candidate = path.join(currentDir, "resources", "app", "package.json");
