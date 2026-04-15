@@ -173,43 +173,6 @@ function Stop-PortProcess {
     }
 }
 
-function Stop-WorkBuddyProcessByUserDataDir {
-    param(
-        [string]$UserDataDir
-    )
-
-    if ([string]::IsNullOrWhiteSpace($UserDataDir)) {
-        return
-    }
-
-    $normalizedUserDataDir = [System.IO.Path]::GetFullPath($UserDataDir).ToLowerInvariant()
-    Get-CimInstance Win32_Process -Filter "Name = 'WorkBuddy.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-        $commandLine = $_.CommandLine
-        if (-not $commandLine) {
-            return
-        }
-
-        $match = [regex]::Match($commandLine, '--user-data-dir=(?:"([^"]+)"|(\S+))')
-        if (-not $match.Success) {
-            return
-        }
-
-        $rawPath = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
-        if (-not $rawPath) {
-            return
-        }
-
-        try {
-            $candidatePath = [System.IO.Path]::GetFullPath($rawPath).ToLowerInvariant()
-            if ($candidatePath -eq $normalizedUserDataDir) {
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-        }
-        catch {
-        }
-    }
-}
-
 function Get-ParentProcessId {
     param(
         [int]$ProcessId
@@ -482,9 +445,7 @@ try {
         Start-Sleep -Seconds 2
     }
     else {
-        Write-Host "Stopping existing WorkBuddy process for current user data dir (if any)..."
-        Stop-WorkBuddyProcessByUserDataDir -UserDataDir $UserDataDir
-        Start-Sleep -Milliseconds 800
+        Write-Host "Skipping WorkBuddy process cleanup before launch."
     }
 
     Write-Host "Launching WorkBuddy main window with CDP on port $CdpPort..."

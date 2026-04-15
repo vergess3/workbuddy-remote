@@ -194,7 +194,7 @@ function Get-WorkBuddyDefaultUserDataDir {
         return Resolve-WorkBuddyRemotePathValue -ScriptDir $ScriptDir -PathValue $configuredPath
     }
 
-    return Join-Path (Get-WorkBuddyRemoteRuntimeRoot -ScriptDir $ScriptDir -Config $Config) "workbuddy-user-data"
+    return Join-Path $env:APPDATA "WorkBuddy"
 }
 
 function Find-UpwardFile {
