@@ -420,7 +420,7 @@ function attachWebSocketServer(server, runtime, auth) {
         }
 
         if (message.type === "port-post") {
-          await runtime.postPortMessage(message.portId, message.payload);
+          await runtime.postPortMessage(socket, message.portId, message.payload);
           return;
         }
 

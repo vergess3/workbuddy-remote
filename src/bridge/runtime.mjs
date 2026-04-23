@@ -1022,7 +1022,11 @@ class BridgeRuntime {
     );
   }
 
-  async postPortMessage(portId, payload) {
+  async postPortMessage(socket, portId, payload) {
+    if (socket) {
+      this.portClients.set(portId, socket);
+    }
+
     const openExternalRequest = this.extractOpenExternalRequest(payload);
     if (openExternalRequest) {
       this.forwardOpenExternal(portId, openExternalRequest);
