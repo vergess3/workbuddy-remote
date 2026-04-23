@@ -76,6 +76,7 @@ function renderShimJs() {
   let reconnectTimer = null;
   let reconnectPromise = null;
   let reconnectAttempt = 0;
+  let delayedBridgeStatusTimer = null;
 
   const makeEvent = () => ({ senderId: "workbuddy-web-bridge" });
   const messages = {
@@ -314,6 +315,11 @@ function renderShimJs() {
   };
 
   const setBridgeStatus = (message) => {
+    if (delayedBridgeStatusTimer) {
+      globalThis.clearTimeout(delayedBridgeStatusTimer);
+      delayedBridgeStatusTimer = null;
+    }
+
     const banner = ensureStatusBanner();
     if (!message) {
       banner.style.display = "none";
@@ -323,6 +329,22 @@ function renderShimJs() {
 
     banner.textContent = message;
     banner.style.display = "block";
+  };
+
+  const setBridgeStatusWithDelay = (message, delayMs = 0) => {
+    if (!message || delayMs <= 0) {
+      setBridgeStatus(message);
+      return;
+    }
+
+    if (delayedBridgeStatusTimer) {
+      globalThis.clearTimeout(delayedBridgeStatusTimer);
+    }
+
+    delayedBridgeStatusTimer = globalThis.setTimeout(() => {
+      delayedBridgeStatusTimer = null;
+      setBridgeStatus(message);
+    }, delayMs);
   };
 
   const sensitiveFieldLabels = {
@@ -550,7 +572,7 @@ function renderShimJs() {
 
     const delayMs = Math.min(1000 * Math.max(1, reconnectAttempt + 1), 5000);
     reconnectAttempt += 1;
-    setBridgeStatus(t("hostConnectionClosed"));
+    setBridgeStatusWithDelay(t("hostConnectionClosed"), 10000);
 
     reconnectPromise = new Promise((resolve) => {
       reconnectTimer = globalThis.setTimeout(resolve, delayMs);
@@ -3018,7 +3040,11 @@ function renderShimJs() {
 
     socket.addEventListener("close", () => {
       hostConnected = false;
-      setBridgeStatus(restartInProgress ? t("restartStarting") : t("hostConnectionClosed"));
+      if (restartInProgress) {
+        setBridgeStatus(t("restartStarting"));
+      } else {
+        setBridgeStatusWithDelay(t("hostConnectionClosed"), 10000);
+      }
       for (const { reject } of pending.values()) {
         reject(new Error("Bridge WebSocket closed"));
       }
@@ -3032,7 +3058,11 @@ function renderShimJs() {
 
     socket.addEventListener("error", () => {
       hostConnected = false;
-      setBridgeStatus(restartInProgress ? t("restartStarting") : t("hostConnectionFailed"));
+      if (restartInProgress) {
+        setBridgeStatus(t("restartStarting"));
+      } else {
+        setBridgeStatusWithDelay(t("hostConnectionFailed"), 10000);
+      }
       if (!restartInProgress && (!socket || socket.readyState === WebSocket.CLOSED)) {
         scheduleReconnect().catch((error) => {
           console.warn("[bridge] Auto-reconnect stopped after error", error);
