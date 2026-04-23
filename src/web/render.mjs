@@ -10,6 +10,17 @@ function renderAgentManagerHtml(assetVersion) {
       http-equiv="Content-Security-Policy"
       content="default-src 'self' data: blob: http: https: ws:; script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; connect-src 'self' ws: http: https:; font-src 'self' data: blob: http: https:;"
     />
+    <style>
+      @media (hover: none) and (pointer: coarse) {
+        input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]),
+        textarea,
+        select,
+        [contenteditable="true"],
+        [role="textbox"] {
+          font-size: 16px !important;
+        }
+      }
+    </style>
     <link rel="stylesheet" href="/mirror/resources/app/out/codebuddy/main.css?v=${assetVersion}" />
     <title>WorkBuddy Agent Manager Bridge</title>
   </head>
