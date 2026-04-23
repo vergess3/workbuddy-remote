@@ -538,6 +538,24 @@ function renderShimJs() {
     return reconnectPromise;
   };
 
+  const probeConnectionOnResume = () => {
+    if (restartInProgress) {
+      return;
+    }
+
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    scheduleReconnect().catch((error) => {
+      console.warn("[bridge] Resume probe reconnect failed", error);
+    });
+  };
+
   const lastRootStorageKey = "workbuddy-bridge:last-root";
   const lastComposerFolderStorageKey = "workbuddy-bridge:last-composer-folder";
 
@@ -3087,6 +3105,15 @@ function renderShimJs() {
   };
 
   mountBridgeUi();
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      probeConnectionOnResume();
+    }
+  });
+  window.addEventListener("focus", probeConnectionOnResume);
+  window.addEventListener("pageshow", probeConnectionOnResume);
+  window.addEventListener("online", probeConnectionOnResume);
 
   readyPromise
     .then(() => {
