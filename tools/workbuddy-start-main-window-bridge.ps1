@@ -469,12 +469,12 @@ try {
     }
 
     $ready = $false
-    for ($i = 0; $i -lt 20; $i++) {
+    for ($i = 0; $i -lt 15; $i++) {
         if (Test-PortListening -Port $CdpPort) {
             $ready = $true
             break
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Seconds 2
     }
 
     if (-not $ready) {
