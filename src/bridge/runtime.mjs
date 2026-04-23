@@ -757,6 +757,21 @@ class BridgeRuntime {
   }
 
   registerBrowserSocket(socket) {
+    for (const existingSocket of this.browserSockets) {
+      if (existingSocket === socket) {
+        continue;
+      }
+
+      try {
+        existingSocket.close(4000, "Superseded by a newer bridge client");
+      } catch (error) {
+        console.warn(
+          "[bridge] Failed to close superseded browser socket:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
     this.browserSockets.add(socket);
     this.browserSocketWindows.set(socket, new Set());
     this.schedulePendingManagedWindowCleanup();
