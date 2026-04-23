@@ -49,109 +49,6 @@ function Get-ProcessNameSafe {
     }
 }
 
-function Normalize-WorkBuddyPath {
-    param(
-        [string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return ""
-    }
-
-    try {
-        return [System.IO.Path]::GetFullPath($Path).TrimEnd('\').ToLowerInvariant()
-    }
-    catch {
-        return $Path.Trim().TrimEnd('\').ToLowerInvariant()
-    }
-}
-
-function Get-WorkBuddyProcessUserDataDir {
-    param(
-        [string]$CommandLine
-    )
-
-    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
-        return ""
-    }
-
-    $match = [regex]::Match($CommandLine, '--user-data-dir="?([^" ]+)')
-    if (-not $match.Success) {
-        return ""
-    }
-
-    return Normalize-WorkBuddyPath -Path $match.Groups[1].Value
-}
-
-function Get-WorkBuddyProcessTreeByUserDataDir {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$UserDataDir
-    )
-
-    $targetUserDataDir = Normalize-WorkBuddyPath -Path $UserDataDir
-    if (-not $targetUserDataDir) {
-        return @()
-    }
-
-    $allProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'WorkBuddy.exe'" -ErrorAction SilentlyContinue)
-    if ($allProcesses.Count -eq 0) {
-        return @()
-    }
-
-    $processById = @{}
-    foreach ($process in $allProcesses) {
-        $processById[[int]$process.ProcessId] = $process
-    }
-
-    $matchedIds = [System.Collections.Generic.HashSet[int]]::new()
-    foreach ($process in $allProcesses) {
-        $processUserDataDir = Get-WorkBuddyProcessUserDataDir -CommandLine $process.CommandLine
-        if ($processUserDataDir -and $processUserDataDir -eq $targetUserDataDir) {
-            [void]$matchedIds.Add([int]$process.ProcessId)
-        }
-    }
-
-    if ($matchedIds.Count -eq 0) {
-        return @()
-    }
-
-    $expanded = $true
-    while ($expanded) {
-        $expanded = $false
-        foreach ($process in $allProcesses) {
-            $parentProcessId = [int]$process.ParentProcessId
-            if ($matchedIds.Contains($parentProcessId) -and -not $matchedIds.Contains([int]$process.ProcessId)) {
-                [void]$matchedIds.Add([int]$process.ProcessId)
-                $expanded = $true
-            }
-        }
-    }
-
-    return @($matchedIds | ForEach-Object { $processById[[int]$_] } | Sort-Object ParentProcessId, ProcessId)
-}
-
-function Stop-WorkBuddyProcessTreeByUserDataDir {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$UserDataDir
-    )
-
-    $processes = @(Get-WorkBuddyProcessTreeByUserDataDir -UserDataDir $UserDataDir)
-    if ($processes.Count -eq 0) {
-        return
-    }
-
-    $processes = $processes | Sort-Object ProcessId -Descending
-    foreach ($process in $processes) {
-        try {
-            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
-        }
-        catch {
-        }
-    }
-}
-
 function Stop-ProcessTreeMember {
     param(
         [int]$ProcessId,
@@ -255,12 +152,7 @@ function Quote-CmdArgument {
 
 Start-Sleep -Milliseconds 700
 
-if ($UserDataDir) {
-    Stop-WorkBuddyProcessTreeByUserDataDir -UserDataDir $UserDataDir
-}
-else {
-    Stop-WorkBuddyInstance -ProcessId $WorkBuddyPid -Port $CdpPort
-}
+Stop-WorkBuddyInstance -ProcessId $WorkBuddyPid -Port $CdpPort
 Stop-ProcessTreeMember -ProcessId $CurrentBridgePid -AllowedNames @("node")
 Stop-ProcessTreeMember -ProcessId $LauncherPid -AllowedNames @("powershell", "pwsh")
 
