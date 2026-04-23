@@ -148,6 +148,15 @@ function renderLoginPage({ locale, errorMessage = "", nextPath = "/agent-manager
         color-scheme: light;
         font-family: "Segoe UI", "PingFang SC", sans-serif;
       }
+      @media (hover: none) and (pointer: coarse) {
+        input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]),
+        textarea,
+        select,
+        [contenteditable="true"],
+        [role="textbox"] {
+          font-size: 16px;
+        }
+      }
       body {
         margin: 0;
         min-height: 100vh;
