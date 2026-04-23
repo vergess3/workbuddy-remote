@@ -489,7 +489,6 @@ function renderShimJs() {
     const id = ++requestId;
     const message = { id, type, ...payload };
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      probeConnectionOnResume();
       return Promise.reject(new Error("Bridge WebSocket is not connected"));
     }
     socket.send(JSON.stringify(message));
@@ -537,7 +536,6 @@ function renderShimJs() {
     if (socket && socket.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
-    probeConnectionOnResume();
     return readyPromise;
   };
 
@@ -586,10 +584,6 @@ function renderShimJs() {
     }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    if (socket && socket.readyState === WebSocket.CONNECTING) {
       return;
     }
 
