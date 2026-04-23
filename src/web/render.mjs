@@ -525,7 +525,8 @@ function renderShimJs() {
         reconnectTimer = null;
         reconnectPromise = null;
         reconnectAttempt = 0;
-        window.location.reload();
+        restoreBridgeSubscriptions();
+        setBridgeStatus("");
       })
       .catch((error) => {
         reconnectTimer = null;
@@ -554,6 +555,20 @@ function renderShimJs() {
     scheduleReconnect().catch((error) => {
       console.warn("[bridge] Resume probe reconnect failed", error);
     });
+  };
+
+  const restoreBridgeSubscriptions = () => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    for (const channel of listeners.keys()) {
+      try {
+        socket.send(JSON.stringify({ type: "subscribe", channel }));
+      } catch (error) {
+        console.warn("[bridge] Failed to restore subscription", channel, error);
+      }
+    }
   };
 
   const lastRootStorageKey = "workbuddy-bridge:last-root";
