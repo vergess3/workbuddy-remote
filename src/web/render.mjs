@@ -497,6 +497,41 @@ function renderShimJs() {
     });
   };
 
+  const withTimeout = (promise, timeoutMs, message) => {
+    return new Promise((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        reject(new Error(message));
+      }, timeoutMs);
+
+      Promise.resolve(promise)
+        .then((value) => {
+          globalThis.clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          globalThis.clearTimeout(timer);
+          reject(error);
+        });
+    });
+  };
+
+  const withBridgeUiRecovery = (runner, onRecover, options = {}) => {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 20000;
+    const timeoutMessage = options.timeoutMessage || "Bridge request timed out";
+    const recover = () => {
+      try {
+        onRecover?.();
+      } catch (error) {
+        console.warn("[bridge] UI recovery hook failed", error);
+      }
+    };
+
+    return withTimeout(Promise.resolve().then(runner), timeoutMs, timeoutMessage).catch((error) => {
+      recover();
+      throw error;
+    });
+  };
+
   const waitForActiveConnection = () => {
     if (socket && socket.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -1024,7 +1059,18 @@ function renderShimJs() {
         applyFilter();
 
         try {
-          const payload = await fetchWorkspaceFolders(rootPath);
+          const payload = await withBridgeUiRecovery(
+            () => fetchWorkspaceFolders(rootPath),
+            () => {
+              setBusy(false);
+              renderWorkspaceOptions();
+              applyFilter();
+            },
+            {
+              timeoutMs: 20000,
+              timeoutMessage: "Loading workspace folders timed out",
+            }
+          );
           workspaceRoot = payload?.workspaceRoot || "";
           folders = payload?.folders || [];
           selectedFolderPath =
@@ -1082,7 +1128,18 @@ function renderShimJs() {
 
           setBusy(true);
           try {
-            const result = await createWorkspaceFolder(selectedRootPath, trimmedName);
+            const result = await withBridgeUiRecovery(
+              () => createWorkspaceFolder(selectedRootPath, trimmedName),
+              () => {
+                setBusy(false);
+                renderWorkspaceOptions();
+                applyFilter();
+              },
+              {
+                timeoutMs: 20000,
+                timeoutMessage: "Creating workspace timed out",
+              }
+            );
             if (!result?.ok || !result.path) {
               window.alert(result?.error || t("failedCreateWorkspace"));
               renderWorkspaceOptions();
@@ -1742,7 +1799,17 @@ function renderShimJs() {
             attaching = true;
             setBusy();
             try {
-              const blob = await fetchWorkspaceFileBlob(entry.path);
+              const blob = await withBridgeUiRecovery(
+                () => fetchWorkspaceFileBlob(entry.path),
+                () => {
+                  attaching = false;
+                  setBusy();
+                },
+                {
+                  timeoutMs: 20000,
+                  timeoutMessage: "Fetching workspace file timed out",
+                }
+              );
               const file = new File([blob], entry.name, {
                 type: blob.type || undefined,
                 lastModified: entry.mtimeMs || Date.now(),
@@ -1765,7 +1832,18 @@ function renderShimJs() {
         setBusy();
         renderFileList();
         try {
-          const payload = await fetchWorkspaceFiles(selectedWorkspacePath);
+          const payload = await withBridgeUiRecovery(
+            () => fetchWorkspaceFiles(selectedWorkspacePath),
+            () => {
+              loading = false;
+              setBusy();
+              renderFileList();
+            },
+            {
+              timeoutMs: 20000,
+              timeoutMessage: "Loading workspace files timed out",
+            }
+          );
           files = payload?.entries || [];
         } catch (error) {
           files = [];
@@ -2419,7 +2497,18 @@ function renderShimJs() {
         renderFileList();
         setBusy();
         try {
-          const payload = await fetchWorkspaceFiles(selectedWorkspacePath);
+          const payload = await withBridgeUiRecovery(
+            () => fetchWorkspaceFiles(selectedWorkspacePath),
+            () => {
+              loadingFiles = false;
+              renderFileList();
+              setBusy();
+            },
+            {
+              timeoutMs: 20000,
+              timeoutMessage: "Loading workspace files timed out",
+            }
+          );
           files = payload?.entries || [];
         } catch (error) {
           files = [];
@@ -2467,7 +2556,19 @@ function renderShimJs() {
             workspaceHint.textContent = t("selectDriveFirst");
             return;
           }
-          const payload = await fetchWorkspaceFolders(drive);
+          const payload = await withBridgeUiRecovery(
+            () => fetchWorkspaceFolders(drive),
+            () => {
+              loadingFolders = false;
+              renderWorkspaceOptions();
+              renderFileList();
+              setBusy();
+            },
+            {
+              timeoutMs: 20000,
+              timeoutMessage: "Loading workspace folders timed out",
+            }
+          );
           folders = payload?.folders || [];
           selectedWorkspacePath =
             preferredFolderPath && folders.some((entry) => entry.path === preferredFolderPath)
@@ -2537,7 +2638,18 @@ function renderShimJs() {
           loadingFolders = true;
           setBusy();
           try {
-            const result = await createWorkspaceFolder(selectedDrive, trimmedName);
+            const result = await withBridgeUiRecovery(
+              () => createWorkspaceFolder(selectedDrive, trimmedName),
+              () => {
+                loadingFolders = false;
+                renderWorkspaceOptions();
+                setBusy();
+              },
+              {
+                timeoutMs: 20000,
+                timeoutMessage: "Creating workspace timed out",
+              }
+            );
             if (!result?.ok || !result.path) {
               window.alert(result?.error || t("failedCreateWorkspace"));
               renderWorkspaceOptions();
@@ -2620,7 +2732,17 @@ function renderShimJs() {
         loadingFiles = true;
         setBusy();
         try {
-          await uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles);
+          await withBridgeUiRecovery(
+            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles),
+            () => {
+              loadingFiles = false;
+              setBusy();
+            },
+            {
+              timeoutMs: 30000,
+              timeoutMessage: "Uploading workspace files timed out",
+            }
+          );
           uploadInput.value = "";
           updateQueuedUploadFiles([]);
           await loadFilesForWorkspace(selectedWorkspacePath);
