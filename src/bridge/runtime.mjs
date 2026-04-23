@@ -25,6 +25,7 @@ const RESTART_HELPER_SCRIPT_PATH = path.resolve(
 );
 const MAIN_CSS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.css");
 const TARGET_CACHE_FILE_NAME = "workbuddy-remote-target-cache.json";
+const PREVIOUS_WINDOW_CLEANUP_DELAY_MS = 4_000;
 
 function createHashVersion(parts) {
   const hash = crypto.createHash("sha256");
@@ -415,6 +416,9 @@ class BridgeRuntime {
     this.authSessionCache = null;
     this.patchedAgentManagerJs = null;
     this.browserSockets = new Set();
+    this.browserSocketWindows = new Map();
+    this.pendingManagedWindowIds = new Set();
+    this.pendingManagedWindowCleanupTimer = null;
     this.channelRefCounts = new Map();
     this.portClients = new Map();
     this.reconnectPromise = null;
@@ -754,14 +758,77 @@ class BridgeRuntime {
 
   registerBrowserSocket(socket) {
     this.browserSockets.add(socket);
+    this.browserSocketWindows.set(socket, new Set());
+    this.schedulePendingManagedWindowCleanup();
     socket.on("close", () => {
       this.browserSockets.delete(socket);
+      const sessionWindows = this.browserSocketWindows.get(socket);
+      if (sessionWindows) {
+        for (const windowId of sessionWindows) {
+          this.pendingManagedWindowIds.add(windowId);
+        }
+      }
+      this.browserSocketWindows.delete(socket);
       for (const [portId, client] of this.portClients.entries()) {
         if (client === socket) {
           this.portClients.delete(portId);
         }
       }
     });
+  }
+
+  trackSocketWindow(socket, windowId) {
+    const windows = this.browserSocketWindows.get(socket);
+    if (!windows || !Number.isInteger(windowId) || windowId <= 0) {
+      return;
+    }
+
+    windows.add(windowId);
+  }
+
+  schedulePendingManagedWindowCleanup() {
+    if (this.pendingManagedWindowIds.size === 0 || this.pendingManagedWindowCleanupTimer) {
+      return;
+    }
+
+    this.pendingManagedWindowCleanupTimer = setTimeout(() => {
+      this.pendingManagedWindowCleanupTimer = null;
+      this.closePendingManagedWindows().catch((error) => {
+        console.warn(
+          "[bridge] Failed to cleanup previous managed windows:",
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+    }, PREVIOUS_WINDOW_CLEANUP_DELAY_MS);
+  }
+
+  async closePendingManagedWindows() {
+    if (this.pendingManagedWindowIds.size === 0) {
+      return;
+    }
+
+    const windowIds = [...this.pendingManagedWindowIds];
+    this.pendingManagedWindowIds.clear();
+
+    for (const windowId of windowIds) {
+      try {
+        const result = await this.invokeIpc("codebuddy:closeManagedWindow", [{ windowId }]);
+        if (result?.closed || result?.alreadyClosed) {
+          console.log("[bridge] Closed previous managed window:", windowId);
+          continue;
+        }
+
+        if (result?.reason) {
+          console.log("[bridge] Skipped previous window cleanup:", windowId, result.reason);
+        }
+      } catch (error) {
+        console.warn(
+          "[bridge] Failed to close previous managed window:",
+          windowId,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
   }
 
   broadcast(message) {
@@ -944,6 +1011,7 @@ class BridgeRuntime {
   }
 
   async openDynamicPort(socket, windowId, nonce, portId) {
+    this.trackSocketWindow(socket, windowId);
     this.portClients.set(portId, socket);
     await this.withCdpRecovery(() =>
       this.cdp.evaluate(
