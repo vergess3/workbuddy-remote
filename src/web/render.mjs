@@ -72,6 +72,10 @@ function renderShimJs() {
   let restartInProgress = false;
   let statusBanner;
   let pendingExternalWindow = null;
+  let readyPromise;
+  let reconnectTimer = null;
+  let reconnectPromise = null;
+  let reconnectAttempt = 0;
 
   const makeEvent = () => ({ senderId: "workbuddy-web-bridge" });
   const messages = {
@@ -491,6 +495,47 @@ function renderShimJs() {
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
     });
+  };
+
+  const waitForActiveConnection = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    return readyPromise;
+  };
+
+  const scheduleReconnect = () => {
+    if (restartInProgress) {
+      return readyPromise;
+    }
+
+    if (reconnectPromise) {
+      return reconnectPromise;
+    }
+
+    const delayMs = Math.min(1000 * Math.max(1, reconnectAttempt + 1), 5000);
+    reconnectAttempt += 1;
+    setBridgeStatus(t("hostConnectionClosed"));
+
+    reconnectPromise = new Promise((resolve) => {
+      reconnectTimer = globalThis.setTimeout(resolve, delayMs);
+    })
+      .then(() => connect())
+      .then(() => {
+        reconnectTimer = null;
+        reconnectPromise = null;
+        reconnectAttempt = 0;
+        window.location.reload();
+      })
+      .catch((error) => {
+        reconnectTimer = null;
+        reconnectPromise = null;
+        console.warn("[bridge] Reconnect attempt failed", error);
+        return scheduleReconnect();
+      });
+
+    readyPromise = reconnectPromise;
+    return reconnectPromise;
   };
 
   const lastRootStorageKey = "workbuddy-bridge:last-root";
@@ -2823,19 +2868,29 @@ function renderShimJs() {
         reject(new Error("Bridge WebSocket closed"));
       }
       pending.clear();
+      if (!restartInProgress) {
+        scheduleReconnect().catch((error) => {
+          console.warn("[bridge] Auto-reconnect stopped after close", error);
+        });
+      }
     });
 
     socket.addEventListener("error", () => {
       hostConnected = false;
       setBridgeStatus(restartInProgress ? t("restartStarting") : t("hostConnectionFailed"));
+      if (!restartInProgress && (!socket || socket.readyState === WebSocket.CLOSED)) {
+        scheduleReconnect().catch((error) => {
+          console.warn("[bridge] Auto-reconnect stopped after error", error);
+        });
+      }
     });
   };
 
-  const readyPromise = connect();
+  readyPromise = connect();
 
   const ipcRenderer = {
     send(channel, ...args) {
-      readyPromise.then(() => {
+      waitForActiveConnection().then(() => {
         if (channel === "codebuddy:requestAgentManagerChannel") {
           const [windowId, nonce] = args;
           acquiredPorts.set(nonce, { channel: "codebuddy:agentManagerChannelReady" });
@@ -2858,7 +2913,7 @@ function renderShimJs() {
 
     invoke(channel, ...args) {
       if (channel === authSessionRequest) {
-        return readyPromise
+        return waitForActiveConnection()
           .then(() =>
             sendRpc("invoke", { channel, args })
               .then((result) => {
@@ -2884,7 +2939,7 @@ function renderShimJs() {
 
       if (channel === ${JSON.stringify(PICK_FOLDER_REQUEST)}) {
         const defaultPath = args?.[0]?.defaultPath;
-        return readyPromise.then(() =>
+        return waitForActiveConnection().then(() =>
           promptForRemoteFolderPath(defaultPath).then((result) => {
             saveLastPickedComposerFolder(result?.[0] || "");
             return result;
@@ -2904,7 +2959,7 @@ function renderShimJs() {
         }
       }
 
-      return readyPromise
+      return waitForActiveConnection()
         .then(() => sendRpc("invoke", { channel, args }))
         .catch((error) => {
           if (channel === ${JSON.stringify(AUTH_LOGIN_REQUEST)}) {
@@ -2928,7 +2983,7 @@ function renderShimJs() {
         });
       }
       if (sizeBefore === 0) {
-        readyPromise.then(() => {
+        waitForActiveConnection().then(() => {
           socket.send(JSON.stringify({ type: "subscribe", channel }));
         }).catch((error) => {
           console.error("[bridge] subscribe failed", channel, error);
@@ -2961,7 +3016,7 @@ function renderShimJs() {
 
       if (handlers.size === 0) {
         listeners.delete(channel);
-        readyPromise.then(() => {
+        waitForActiveConnection().then(() => {
           socket.send(JSON.stringify({ type: "unsubscribe", channel }));
         }).catch((error) => {
           console.error("[bridge] unsubscribe failed", channel, error);
@@ -2979,7 +3034,7 @@ function renderShimJs() {
       return runtimeConfig;
     },
     async resolveConfiguration() {
-      await readyPromise;
+      await waitForActiveConnection();
       return runtimeConfig;
     },
   };
