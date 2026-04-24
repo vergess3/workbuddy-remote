@@ -429,6 +429,7 @@ class BridgeRuntime {
     this.warmupPromise = null;
     this.shimJs = null;
     this.assetVersion = "";
+    this.connectionLogSessions = new Map();
   }
 
   async initialize() {
@@ -777,6 +778,21 @@ class BridgeRuntime {
     });
   }
 
+  registerConnectionLogSession(socket, session) {
+    if (!socket || !session) {
+      return;
+    }
+
+    this.connectionLogSessions.set(socket, session);
+    socket.on("close", () => {
+      this.connectionLogSessions.delete(socket);
+    });
+  }
+
+  getConnectionLogSession(socket) {
+    return this.connectionLogSessions.get(socket) || null;
+  }
+
   trackSocketWindow(socket, windowId) {
     const windows = this.browserSocketWindows.get(socket);
     if (!windows || !Number.isInteger(windowId) || windowId <= 0) {
@@ -842,6 +858,12 @@ class BridgeRuntime {
 
   sendToSocket(socket, message) {
     if (socket.readyState === WebSocket.OPEN) {
+      const session = this.getConnectionLogSession(socket);
+      if (session) {
+        session
+          .write("BridgeToBrowser", "Sending message to browser.", message)
+          .catch(() => {});
+      }
       socket.send(JSON.stringify(message));
     }
   }
@@ -1178,6 +1200,10 @@ class BridgeRuntime {
     if (payload.type === "dynamic-port-ready") {
       const socket = this.portClients.get(payload.portId);
       if (socket) {
+        const session = this.getConnectionLogSession(socket);
+        if (session) {
+          session.write("BridgeNotify", "Dynamic port ready.", payload).catch(() => {});
+        }
         this.sendToSocket(socket, payload);
       }
       return;
@@ -1186,6 +1212,10 @@ class BridgeRuntime {
     if (payload.type === "dynamic-port-error") {
       const socket = this.portClients.get(payload.portId);
       if (socket) {
+        const session = this.getConnectionLogSession(socket);
+        if (session) {
+          session.write("BridgeNotify", "Dynamic port error.", payload).catch(() => {});
+        }
         this.sendToSocket(socket, payload);
       }
       return;
@@ -1194,12 +1224,24 @@ class BridgeRuntime {
     if (payload.type === "port-message" || payload.type === "port-message-error") {
       const socket = this.portClients.get(payload.portId);
       if (socket) {
+        const session = this.getConnectionLogSession(socket);
+        if (session) {
+          session
+            .write("BridgeNotify", "Dynamic port message received from host.", payload)
+            .catch(() => {});
+        }
         this.sendToSocket(socket, payload);
       }
       return;
     }
 
     if (payload.type === "ipc-event") {
+      for (const socket of this.browserSockets) {
+        const session = this.getConnectionLogSession(socket);
+        if (session) {
+          session.write("BridgeNotify", "IPC event broadcast.", payload).catch(() => {});
+        }
+      }
       if (payload.channel === AUTH_SESSION_CHANNEL) {
         this.cacheAuthSession(payload.args?.[0]);
       }

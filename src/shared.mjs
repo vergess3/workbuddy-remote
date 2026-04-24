@@ -84,6 +84,7 @@ const DEFAULTS = {
   relaunchShell: "powershell",
   showReadyWindow: false,
   openBrowser: false,
+  runtimeRootDir: "",
 };
 
 const AUTH_SESSION_CHANNEL = "vscode:genie:auth:sessionChanged";
@@ -144,6 +145,10 @@ function parseArgs(argv) {
         break;
       case "--open-browser":
         config.openBrowser = true;
+        break;
+      case "--runtime-root-dir":
+        config.runtimeRootDir = next || "";
+        i += 1;
         break;
       default:
         break;

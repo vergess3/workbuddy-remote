@@ -27,6 +27,7 @@ import {
 } from "../workspace/service.mjs";
 import { loadBridgeUiConfig } from "../config.mjs";
 import { renderAgentManagerHtml } from "../web/render.mjs";
+import { ConnectionLogger } from "./connection-logger.mjs";
 
 const HTML_CACHE_CONTROL = "no-cache";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -179,6 +180,47 @@ function getAccessUrls(options) {
   }
 
   return [`http://${options.listenHost}:${options.listenPort}/agent-manager/`];
+}
+
+function getRequestIp(req) {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+    return forwardedFor.split(",")[0].trim();
+  }
+
+  if (Array.isArray(forwardedFor) && forwardedFor.length > 0) {
+    return String(forwardedFor[0]).split(",")[0].trim();
+  }
+
+  return req.socket?.remoteAddress || "";
+}
+
+function sanitizeHeaders(headers) {
+  const result = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (Array.isArray(value)) {
+      result[key] = value.join(", ");
+      continue;
+    }
+
+    result[key] = value;
+  }
+  return result;
+}
+
+function getSocketStateLabel(socket) {
+  switch (socket.readyState) {
+    case socket.CONNECTING:
+      return "CONNECTING";
+    case socket.OPEN:
+      return "OPEN";
+    case socket.CLOSING:
+      return "CLOSING";
+    case socket.CLOSED:
+      return "CLOSED";
+    default:
+      return `UNKNOWN(${socket.readyState})`;
+  }
 }
 
 function createRequestHandler(runtime, auth) {
@@ -367,17 +409,40 @@ function createRequestHandler(runtime, auth) {
   };
 }
 
-function attachWebSocketServer(server, runtime, auth) {
+function attachWebSocketServer(server, runtime, auth, connectionLogger) {
   const wss = new WebSocketServer({ noServer: true });
 
-  wss.on("connection", (socket) => {
+  wss.on("connection", async (socket, req) => {
+    const requestUrl = new URL(req?.url || "/", "http://bridge.local");
+    const logSession = await connectionLogger.createSession("browser-websocket", {
+      type: "browser-websocket",
+      method: req?.method || "GET",
+      path: requestUrl.pathname,
+      search: requestUrl.search || "",
+      ip: getRequestIp(req),
+      httpVersion: req?.httpVersion || "",
+      headers: sanitizeHeaders(req?.headers),
+    });
+
+    logSession.write("BrowserConnection", "Socket connected.", {
+      readyState: getSocketStateLabel(socket),
+    }).catch(() => {});
+
     runtime.registerBrowserSocket(socket);
+    runtime.registerConnectionLogSession(socket, logSession);
 
     socket.on("message", async (raw) => {
+      const rawText = raw?.toString?.() ?? String(raw);
+      await logSession.write("BrowserConnection", "Received client message.", {
+        byteLength: Buffer.byteLength(rawText),
+        raw: rawText,
+      });
+
       let message;
       try {
-        message = JSON.parse(raw.toString());
-      } catch {
+        message = JSON.parse(rawText);
+      } catch (error) {
+        await logSession.write("BrowserConnection", "Failed to parse client JSON.", error);
         runtime.sendToSocket(socket, {
           ok: false,
           error: "Invalid JSON",
@@ -391,6 +456,11 @@ function attachWebSocketServer(server, runtime, auth) {
             message.channel === AUTH_LOGIN_REQUEST
               ? await runtime.invokeAuthLogin(socket, message.args || [])
               : await runtime.invokeIpc(message.channel, message.args || []);
+          await logSession.write("BrowserConnection", "Invoke completed.", {
+            id: message.id,
+            channel: message.channel,
+            result,
+          });
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,
@@ -401,36 +471,62 @@ function attachWebSocketServer(server, runtime, auth) {
 
         if (message.type === "send") {
           await runtime.sendIpc(message.channel, message.args || []);
+          await logSession.write("BrowserConnection", "Send forwarded to IPC.", {
+            channel: message.channel,
+            args: message.args || [],
+          });
           return;
         }
 
         if (message.type === "subscribe") {
           await runtime.subscribeChannel(message.channel);
+          await logSession.write("BrowserConnection", "Subscribed channel.", {
+            channel: message.channel,
+          });
           return;
         }
 
         if (message.type === "unsubscribe") {
           await runtime.unsubscribeChannel(message.channel);
+          await logSession.write("BrowserConnection", "Unsubscribed channel.", {
+            channel: message.channel,
+          });
           return;
         }
 
         if (message.type === "open-dynamic-port") {
           await runtime.openDynamicPort(socket, message.windowId, message.nonce, message.portId);
+          await logSession.write("BrowserConnection", "Opened dynamic port.", {
+            windowId: message.windowId,
+            nonce: message.nonce,
+            portId: message.portId,
+          });
           return;
         }
 
         if (message.type === "port-post") {
           await runtime.postPortMessage(socket, message.portId, message.payload);
+          await logSession.write("BrowserConnection", "Posted dynamic port message.", {
+            portId: message.portId,
+            payload: message.payload,
+          });
           return;
         }
 
         if (message.type === "port-close") {
           await runtime.closePort(message.portId);
+          await logSession.write("BrowserConnection", "Closed dynamic port.", {
+            portId: message.portId,
+          });
           return;
         }
 
         if (message.type === "restart-app") {
           const result = await runtime.requestRestart();
+          await logSession.write("BrowserConnection", "Restart requested.", {
+            id: message.id,
+            result,
+          });
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,
@@ -439,6 +535,10 @@ function attachWebSocketServer(server, runtime, auth) {
           return;
         }
       } catch (error) {
+        await logSession.write("BrowserConnection", "Message handling failed.", {
+          message,
+          error,
+        });
         const payload = {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -454,6 +554,27 @@ function attachWebSocketServer(server, runtime, auth) {
 
         runtime.sendToSocket(socket, payload);
       }
+    });
+
+    socket.on("close", (code, reasonBuffer) => {
+      const reason =
+        typeof reasonBuffer === "string"
+          ? reasonBuffer
+          : Buffer.isBuffer(reasonBuffer)
+            ? reasonBuffer.toString("utf8")
+            : "";
+      logSession
+        .close({
+          event: "socket-close",
+          code,
+          reason,
+          readyState: getSocketStateLabel(socket),
+        })
+        .catch(() => {});
+    });
+
+    socket.on("error", (error) => {
+      logSession.write("BrowserConnection", "Socket error.", error).catch(() => {});
     });
   });
 
@@ -485,7 +606,9 @@ async function startBridgeServer(runtime, options) {
   }
 
   const server = http.createServer(createRequestHandler(runtime, auth));
-  attachWebSocketServer(server, runtime, auth);
+  const runtimeRoot = options.runtimeRootDir || path.resolve(process.cwd(), "output", "runtime");
+  const connectionLogger = new ConnectionLogger(runtimeRoot);
+  attachWebSocketServer(server, runtime, auth, connectionLogger);
 
   await new Promise((resolve) => {
     server.listen(options.listenPort, options.listenHost, resolve);
