@@ -61,6 +61,8 @@ function renderShimJs() {
   const pending = new Map();
   const acquiredPorts = new Map();
   const livePorts = new Map();
+  const pendingPortOpenByWindow = new Map();
+  const activePortByWindow = new Map();
   const authSessionStorageKey = \`__workbuddy_bridge_auth_session__:\${location.host}\`;
   let requestId = 0;
   let socket;
@@ -559,6 +561,86 @@ function renderShimJs() {
       return Promise.resolve();
     }
     return readyPromise;
+  };
+
+  const cleanupPortState = (portId) => {
+    if (!portId) {
+      return;
+    }
+
+    const livePort = livePorts.get(portId);
+    if (livePort) {
+      try {
+        livePort.close?.();
+      } catch {}
+      livePorts.delete(portId);
+    }
+
+    for (const [windowId, activePortId] of activePortByWindow.entries()) {
+      if (activePortId === portId) {
+        activePortByWindow.delete(windowId);
+      }
+    }
+
+    for (const [windowId, entry] of pendingPortOpenByWindow.entries()) {
+      if (entry?.portId === portId || entry?.nonce === portId) {
+        pendingPortOpenByWindow.delete(windowId);
+      }
+    }
+  };
+
+  const resetDynamicPortState = () => {
+    pendingPortOpenByWindow.clear();
+    activePortByWindow.clear();
+
+    for (const [portId] of livePorts.entries()) {
+      cleanupPortState(portId);
+    }
+
+    acquiredPorts.clear();
+  };
+
+  const requestDynamicPortOpen = (windowId, nonce) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("Bridge WebSocket is not connected");
+    }
+
+    if (!Number.isInteger(windowId) || windowId <= 0 || !nonce) {
+      throw new Error("Invalid dynamic port request");
+    }
+
+    const activePortId = activePortByWindow.get(windowId);
+    if (activePortId && livePorts.has(activePortId)) {
+      return activePortId;
+    }
+
+    const pendingEntry = pendingPortOpenByWindow.get(windowId);
+    if (pendingEntry) {
+      return pendingEntry.portId;
+    }
+
+    const portId = nonce;
+    acquiredPorts.set(nonce, {
+      channel: "codebuddy:agentManagerChannelReady",
+      windowId,
+      portId,
+    });
+    pendingPortOpenByWindow.set(windowId, {
+      nonce,
+      portId,
+      requestedAt: Date.now(),
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: "open-dynamic-port",
+        windowId,
+        nonce,
+        portId,
+      })
+    );
+
+    return portId;
   };
 
   const scheduleReconnect = () => {
@@ -3000,6 +3082,11 @@ function renderShimJs() {
           return;
         }
 
+        const previousPortId = activePortByWindow.get(acquired.windowId);
+        if (previousPortId && previousPortId !== message.portId) {
+          cleanupPortState(previousPortId);
+        }
+
         const localChannel = new MessageChannel();
         localChannel.port2.start();
         localChannel.port2.onmessage = (portEvent) => {
@@ -3013,11 +3100,19 @@ function renderShimJs() {
         };
 
         livePorts.set(message.portId, localChannel.port2);
+        activePortByWindow.set(acquired.windowId, message.portId);
+        pendingPortOpenByWindow.delete(acquired.windowId);
+        acquiredPorts.delete(message.nonce);
         window.postMessage(message.nonce, "*", [localChannel.port1]);
         return;
       }
 
       if (message.type === "dynamic-port-error") {
+        const acquired = acquiredPorts.get(message.nonce);
+        if (acquired?.windowId) {
+          pendingPortOpenByWindow.delete(acquired.windowId);
+        }
+        acquiredPorts.delete(message.nonce);
         emit("codebuddy:agentManagerChannelError", {
           nonce: message.nonce,
           error: message.error,
@@ -3040,6 +3135,7 @@ function renderShimJs() {
 
     socket.addEventListener("close", () => {
       hostConnected = false;
+      resetDynamicPortState();
       if (restartInProgress) {
         setBridgeStatus(t("restartStarting"));
       } else {
@@ -3058,6 +3154,7 @@ function renderShimJs() {
 
     socket.addEventListener("error", () => {
       hostConnected = false;
+      resetDynamicPortState();
       if (restartInProgress) {
         setBridgeStatus(t("restartStarting"));
       } else {
@@ -3078,15 +3175,7 @@ function renderShimJs() {
       waitForActiveConnection().then(() => {
         if (channel === "codebuddy:requestAgentManagerChannel") {
           const [windowId, nonce] = args;
-          acquiredPorts.set(nonce, { channel: "codebuddy:agentManagerChannelReady" });
-          socket.send(
-            JSON.stringify({
-              type: "open-dynamic-port",
-              windowId,
-              nonce,
-              portId: nonce,
-            })
-          );
+          requestDynamicPortOpen(windowId, nonce);
           return;
         }
 

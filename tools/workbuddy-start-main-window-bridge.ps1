@@ -503,8 +503,6 @@ try {
         $BridgePort,
         "--user-data-dir",
         $UserDataDir,
-        "--runtime-root-dir",
-        $runtimeRoot,
         "--workbuddy-pid",
         $workBuddyProcess.Id,
         "--launcher-pid",
