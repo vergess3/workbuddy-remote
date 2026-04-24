@@ -3,6 +3,18 @@
 
 This project exposes Tencent `WorkBuddy` running on a Windows host as a browser-accessible web UI. You can remotely access WorkBuddy from anywhere on a desktop, tablet, or phone with just a browser, without preinstalling any extra app.
 
+## Changelog
+
+### 2026-04-24
+
+- Optimized memory management to significantly reduce memory usage
+- Greatly improved web page loading speed
+- Fixed silent disconnects when switching away from the app on mobile and then returning
+- Fixed intermittent silent disconnects during first load on both desktop and mobile that could cause model loading to fail
+- Fixed failures when sending messages
+- Fixed failures when opening conversations
+- Fixed several known stability issues to improve the remote usage experience
+
 ## Features
 
 - Use WorkBuddy from anywhere through a browser as long as you have a reachable path such as a public IP, VPN, tunnel, or similar setup
