@@ -5,7 +5,7 @@
   "cdpPort": 9333,
   "bridgePort": 8780,
   "listenHost": "0.0.0.0",
-  "killWorkBuddyProcessesBeforeStart": false,
+  "killWorkBuddyProcessesBeforeStart": true,
   "showReadyWindow": false,
   "workspaceRoots": [],
   "maskBridgeModelSecrets": true
