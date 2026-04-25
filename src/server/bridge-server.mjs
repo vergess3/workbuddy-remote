@@ -41,10 +41,6 @@ function createWeakEtag(stats) {
   return `W/"${stats.size}-${Math.trunc(stats.mtimeMs)}"`;
 }
 
-function isSamePath(left, right) {
-  return path.normalize(left).toLowerCase() === path.normalize(right).toLowerCase();
-}
-
 function pickContentEncoding(req) {
   const acceptEncoding = String(req.headers["accept-encoding"] || "");
   if (acceptEncoding.includes("br")) {
@@ -357,14 +353,6 @@ function createRequestHandler(runtime, auth) {
           requestUrl.searchParams.get("v") === runtime.getAssetVersion()
             ? IMMUTABLE_CACHE_CONTROL
             : REVALIDATED_STATIC_CACHE_CONTROL;
-
-        if (isSamePath(normalized, runtime.getCodeBuddyMainJsPath())) {
-          sendVersionedScript(req, res, runtime.getPatchedCodeBuddyMainJs(), {
-            etag: `"codebuddy-main-${runtime.getAssetVersion()}"`,
-            cacheControl,
-          });
-          return;
-        }
 
         await sendStaticAsset(req, res, normalized, stats, cacheControl);
         return;

@@ -24,7 +24,6 @@ const RESTART_HELPER_SCRIPT_PATH = path.resolve(
   "workbuddy-restart-instance.ps1"
 );
 const MAIN_CSS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.css");
-const CODEBUDDY_MAIN_JS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.js");
 const TARGET_CACHE_FILE_NAME = "workbuddy-remote-target-cache.json";
 const PREVIOUS_WINDOW_CLEANUP_DELAY_MS = 4_000;
 
@@ -429,7 +428,6 @@ class BridgeRuntime {
     this.systemChannels = new Set([AUTH_SESSION_CHANNEL]);
     this.warmupPromise = null;
     this.shimJs = null;
-    this.patchedCodeBuddyMainJs = null;
     this.assetVersion = "";
   }
 
@@ -439,31 +437,19 @@ class BridgeRuntime {
   }
 
   async prepareWebAssets() {
-    if (
-      this.patchedAgentManagerJs &&
-      this.patchedCodeBuddyMainJs &&
-      this.shimJs &&
-      this.assetVersion
-    ) {
+    if (this.patchedAgentManagerJs && this.shimJs && this.assetVersion) {
       return;
     }
 
-    const [patchedAgentManagerJs, patchedCodeBuddyMainJs, mainCss, shimJs] = await Promise.all([
+    const [patchedAgentManagerJs, mainCss, shimJs] = await Promise.all([
       this.buildPatchedAgentManagerJs(),
-      this.buildPatchedCodeBuddyMainJs(),
       fs.readFile(MAIN_CSS_PATH, "utf8"),
       Promise.resolve(renderShimJs()),
     ]);
 
     this.patchedAgentManagerJs = patchedAgentManagerJs;
-    this.patchedCodeBuddyMainJs = patchedCodeBuddyMainJs;
     this.shimJs = shimJs;
-    this.assetVersion = createHashVersion([
-      mainCss,
-      shimJs,
-      patchedAgentManagerJs,
-      patchedCodeBuddyMainJs,
-    ]);
+    this.assetVersion = createHashVersion([mainCss, shimJs, patchedAgentManagerJs]);
   }
 
   async warmup() {
@@ -494,14 +480,6 @@ class BridgeRuntime {
 
   getPatchedAgentManagerJs() {
     return this.patchedAgentManagerJs || "";
-  }
-
-  getPatchedCodeBuddyMainJs() {
-    return this.patchedCodeBuddyMainJs || "";
-  }
-
-  getCodeBuddyMainJsPath() {
-    return CODEBUDDY_MAIN_JS_PATH;
   }
 
   getTargetCachePath() {
@@ -776,27 +754,6 @@ class BridgeRuntime {
     }
 
     return source.replace(from, to);
-  }
-
-  async buildPatchedCodeBuddyMainJs() {
-    const source = await fs.readFile(CODEBUDDY_MAIN_JS_PATH, "utf8");
-    const exposeLocalAttachHookFrom =
-      '},[n,a,t,s]),E=(0,L.useCallback)(async()=>{if(!t?.pickFile||!n)return;let B=t.environmentType==="cloud",';
-    const exposeLocalAttachHookTo =
-      '},[n,a,t,s]),_=(0,L.useCallback)(async(B,w=Date.now())=>{if(t?.environmentType==="cloud"||typeof B!="string"||!B)return!1;await C(B,w);return!0},[t,C]),E=(typeof globalThis!="undefined"&&(globalThis.__WB_REMOTE_ATTACH_LOCAL_FILE__=_),(0,L.useCallback)(async()=>{if(!t?.pickFile||!n)return;let B=t.environmentType==="cloud",';
-    const closeLocalAttachHookFrom = '},[t,n,m,C,i,d,g]),b=(0,L.useMemo)';
-    const closeLocalAttachHookTo = '},[t,n,m,C,i,d,g])),b=(0,L.useMemo)';
-
-    if (
-      !source.includes(exposeLocalAttachHookFrom) ||
-      !source.includes(closeLocalAttachHookFrom)
-    ) {
-      throw new Error("Unable to patch codebuddy/main.js: attachment hook anchor not found");
-    }
-
-    return source
-      .replace(exposeLocalAttachHookFrom, exposeLocalAttachHookTo)
-      .replace(closeLocalAttachHookFrom, closeLocalAttachHookTo);
   }
 
   registerBrowserSocket(socket) {
