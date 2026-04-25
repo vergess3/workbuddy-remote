@@ -1663,7 +1663,41 @@ function renderShimJs() {
     return visibleEditors.at(-1) || null;
   };
 
-  const attachFilesToComposer = (files) => {
+  const markRemoteInlineFile = (file, sourcePath) => {
+    Object.defineProperty(file, "__WB_REMOTE_INLINE_FILE__", {
+      value: true,
+      configurable: true,
+    });
+    Object.defineProperty(file, "__WB_REMOTE_SOURCE_PATH__", {
+      value: sourcePath,
+      configurable: true,
+    });
+    return file;
+  };
+
+  const attachFilesToComposer = async (files) => {
+    const remoteSourcePaths = files
+      .map((file) =>
+        file?.__WB_REMOTE_INLINE_FILE__ && typeof file.__WB_REMOTE_SOURCE_PATH__ === "string"
+          ? file.__WB_REMOTE_SOURCE_PATH__
+          : ""
+      )
+      .filter(Boolean);
+
+    if (
+      remoteSourcePaths.length === files.length &&
+      typeof globalThis.__WB_REMOTE_ATTACH_LOCAL_FILE__ === "function"
+    ) {
+      const timestamp = Date.now();
+      const results = [];
+      for (const sourcePath of remoteSourcePaths) {
+        results.push(await globalThis.__WB_REMOTE_ATTACH_LOCAL_FILE__(sourcePath, timestamp));
+      }
+      if (results.every(Boolean)) {
+        return;
+      }
+    }
+
     const editor = findActiveComposerEditor();
     if (!editor) {
       throw new Error(t("remoteAttachUnavailable"));
@@ -1695,17 +1729,28 @@ function renderShimJs() {
       roots,
       loadLastPickedRoot()
     );
-    const selectedWorkspacePath =
-      loadLastPickedComposerFolder() || autoSelection.preferredFolderPath;
-    if (!selectedWorkspacePath) {
+    const savedComposerFolder = loadLastPickedComposerFolder();
+    const initialWorkspacePath = autoSelection.preferredFolderPath || savedComposerFolder;
+    const initialDrive =
+      autoSelection.rootPath ||
+      deriveInitialRoot(initialWorkspacePath, roots) ||
+      loadLastPickedRoot();
+    if (!initialDrive && roots.length === 0) {
       window.alert(t("currentFolderUnavailable"));
       return;
     }
 
     return new Promise((resolve, reject) => {
+      let selectedDrive = roots.some((entry) => entry.path === initialDrive)
+        ? initialDrive
+        : roots[0]?.path || "";
+      let selectedWorkspacePath = initialWorkspacePath;
+      let folders = [];
       let files = [];
+      let queuedUploadFiles = [];
       let searchKeyword = "";
-      let loading = true;
+      let loadingFolders = false;
+      let loadingFiles = false;
       let attaching = false;
 
       const overlay = document.createElement("div");
@@ -1723,8 +1768,8 @@ function renderShimJs() {
 
       const panel = document.createElement("div");
       panel.style.cssText = [
-        "width:min(760px, 100%)",
-        "max-height:min(760px, calc(100vh - 48px))",
+        "width:min(860px, 100%)",
+        "max-height:min(820px, calc(100vh - 48px))",
         "overflow:hidden",
         "border-radius:16px",
         "background:#151823",
@@ -1750,6 +1795,61 @@ function renderShimJs() {
       body.style.cssText =
         "padding:0 24px 20px;display:flex;flex-direction:column;gap:14px;overflow:auto;";
       panel.appendChild(body);
+
+      const topRow = document.createElement("div");
+      topRow.style.cssText =
+        "display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:12px;align-items:end;";
+      body.appendChild(topRow);
+
+      const driveField = document.createElement("label");
+      driveField.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+      topRow.appendChild(driveField);
+
+      const driveLabel = document.createElement("span");
+      driveLabel.textContent = t("drive");
+      driveLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      driveField.appendChild(driveLabel);
+
+      const driveSelect = document.createElement("select");
+      driveSelect.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;";
+      driveField.appendChild(driveSelect);
+
+      const drivePlaceholder = document.createElement("option");
+      drivePlaceholder.value = "";
+      drivePlaceholder.textContent = t("selectDrive");
+      driveSelect.appendChild(drivePlaceholder);
+
+      for (const driveEntry of roots) {
+        const option = document.createElement("option");
+        option.value = driveEntry.path;
+        option.textContent = driveEntry.label || driveEntry.path;
+        driveSelect.appendChild(option);
+      }
+      driveSelect.value = selectedDrive;
+
+      const workspaceField = document.createElement("label");
+      workspaceField.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+      topRow.appendChild(workspaceField);
+
+      const workspaceLabel = document.createElement("span");
+      workspaceLabel.textContent = t("workspace");
+      workspaceLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      workspaceField.appendChild(workspaceLabel);
+
+      const workspaceSelect = document.createElement("select");
+      workspaceSelect.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;";
+      workspaceField.appendChild(workspaceSelect);
+
+      const createWorkspaceOption = document.createElement("option");
+      createWorkspaceOption.value = "__create_workspace__";
+      createWorkspaceOption.textContent = t("createFolder");
+
+      const refreshButton = document.createElement("button");
+      refreshButton.type = "button";
+      refreshButton.textContent = t("refresh");
+      refreshButton.style.cssText =
+        "height:40px;padding:0 16px;border:1px solid #39415d;border-radius:10px;background:#101528;color:#d9e0ff;cursor:pointer;";
+      topRow.appendChild(refreshButton);
 
       const workspaceHint = document.createElement("div");
       workspaceHint.style.cssText =
@@ -1779,6 +1879,55 @@ function renderShimJs() {
         "outline:none",
       ].join(";");
       searchField.appendChild(searchInput);
+
+      const uploadRow = document.createElement("div");
+      uploadRow.style.cssText =
+        "display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:12px;align-items:start;";
+      body.appendChild(uploadRow);
+
+      const uploadField = document.createElement("label");
+      uploadField.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+      uploadRow.appendChild(uploadField);
+
+      const uploadLabel = document.createElement("span");
+      uploadLabel.textContent = t("uploadFiles");
+      uploadLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      uploadField.appendChild(uploadLabel);
+
+      const uploadInput = document.createElement("input");
+      uploadInput.type = "file";
+      uploadInput.multiple = true;
+      uploadInput.style.cssText =
+        "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;";
+      uploadField.appendChild(uploadInput);
+
+      const dropZone = document.createElement("button");
+      dropZone.type = "button";
+      dropZone.textContent = t("dropFilesHint");
+      dropZone.style.cssText = [
+        "height:72px",
+        "padding:12px",
+        "border:1px dashed #4d5a86",
+        "border-radius:12px",
+        "background:#0f1320",
+        "color:#cfd8ff",
+        "text-align:center",
+        "cursor:pointer",
+        "font:13px/1.5 'Segoe UI', sans-serif",
+      ].join(";");
+      uploadField.appendChild(dropZone);
+
+      const uploadHint = document.createElement("div");
+      uploadHint.style.cssText = "font-size:12px;color:#7d89b4;";
+      uploadHint.textContent = t("noFilesSelected");
+      uploadField.appendChild(uploadHint);
+
+      const uploadButton = document.createElement("button");
+      uploadButton.type = "button";
+      uploadButton.textContent = t("upload");
+      uploadButton.style.cssText =
+        "margin-top:24px;height:72px;padding:0 8px;border:none;border-radius:12px;background:#31c48d;color:#062b1f;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.2;";
+      uploadRow.appendChild(uploadButton);
 
       const listWrapper = document.createElement("div");
       listWrapper.style.cssText = [
@@ -1827,8 +1976,53 @@ function renderShimJs() {
       };
 
       const setBusy = () => {
-        searchInput.disabled = loading || attaching;
+        const busy = loadingFolders || loadingFiles || attaching;
+        driveSelect.disabled = busy;
+        workspaceSelect.disabled = busy;
+        refreshButton.disabled = busy;
+        searchInput.disabled = busy;
+        uploadInput.disabled = busy || !selectedWorkspacePath;
+        dropZone.disabled = busy || !selectedWorkspacePath;
+        uploadButton.disabled = busy || !selectedWorkspacePath || queuedUploadFiles.length === 0;
         closeButton.disabled = attaching;
+      };
+
+      const renderWorkspaceOptions = () => {
+        workspaceSelect.replaceChildren();
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = loadingFolders ? t("loadingWorkspaces") : t("selectWorkspace");
+        workspaceSelect.appendChild(placeholder);
+
+        for (const entry of folders) {
+          const option = document.createElement("option");
+          option.value = entry.path;
+          option.textContent = entry.name;
+          workspaceSelect.appendChild(option);
+        }
+
+        workspaceSelect.appendChild(createWorkspaceOption);
+        workspaceSelect.value = folders.some((entry) => entry.path === selectedWorkspacePath)
+          ? selectedWorkspacePath
+          : "";
+      };
+
+      const updateQueuedUploadFiles = (nextFiles) => {
+        queuedUploadFiles = Array.from(nextFiles || []);
+        if (queuedUploadFiles.length === 0) {
+          uploadHint.textContent = t("noFilesSelected");
+          dropZone.textContent = t("dropFilesHint");
+        } else {
+          const names = queuedUploadFiles.slice(0, 3).map((file) => file.name).join(", ");
+          const suffix =
+            queuedUploadFiles.length > 3
+              ? t("selectedFilesSuffix", { count: queuedUploadFiles.length })
+              : "";
+          uploadHint.textContent = t("selectedFiles", { names, suffix });
+          dropZone.textContent = t("selectedFilesHint");
+        }
+        setBusy();
       };
 
       const getFilteredFiles = () => {
@@ -1844,7 +2038,13 @@ function renderShimJs() {
         const filteredFiles = getFilteredFiles();
         listWrapper.replaceChildren();
 
-        if (loading) {
+        if (!selectedWorkspacePath) {
+          emptyState.textContent = loadingFolders ? t("loadingWorkspaces") : t("selectWorkspaceFirst");
+          listWrapper.appendChild(emptyState);
+          return;
+        }
+
+        if (loadingFiles) {
           emptyState.textContent = t("loadingFiles");
           listWrapper.appendChild(emptyState);
           return;
@@ -1918,7 +2118,10 @@ function renderShimJs() {
                 type: blob.type || undefined,
                 lastModified: entry.mtimeMs || Date.now(),
               });
-              attachFilesToComposer([file]);
+              markRemoteInlineFile(file, entry.path);
+              await attachFilesToComposer([file]);
+              saveLastPickedRoot(selectedDrive);
+              saveLastPickedComposerFolder(selectedWorkspacePath);
               finish();
             } catch (error) {
               attaching = false;
@@ -1932,14 +2135,22 @@ function renderShimJs() {
       };
 
       const loadFiles = async () => {
-        loading = true;
+        if (!selectedWorkspacePath) {
+          files = [];
+          renderFileList();
+          setBusy();
+          return;
+        }
+
+        loadingFiles = true;
         setBusy();
         renderFileList();
+        workspaceHint.textContent = t("currentWorkspace", { path: selectedWorkspacePath });
         try {
           const payload = await withBridgeUiRecovery(
             () => fetchWorkspaceFiles(selectedWorkspacePath),
             () => {
-              loading = false;
+              loadingFiles = false;
               setBusy();
               renderFileList();
             },
@@ -1954,9 +2165,58 @@ function renderShimJs() {
           workspaceHint.textContent = t("failedLoadCurrentFolder");
           window.alert(error instanceof Error ? error.message : String(error));
         } finally {
-          loading = false;
+          loadingFiles = false;
           setBusy();
           renderFileList();
+        }
+      };
+
+      const loadFoldersForDrive = async (drive, preferredFolderPath = "") => {
+        selectedDrive = drive;
+        saveLastPickedRoot(drive);
+        loadingFolders = true;
+        folders = [];
+        files = [];
+        selectedWorkspacePath = "";
+        renderWorkspaceOptions();
+        renderFileList();
+        setBusy();
+        try {
+          if (!drive) {
+            workspaceHint.textContent = t("selectDriveFirst");
+            return;
+          }
+          const payload = await withBridgeUiRecovery(
+            () => fetchWorkspaceFolders(drive),
+            () => {
+              loadingFolders = false;
+              renderWorkspaceOptions();
+              renderFileList();
+              setBusy();
+            },
+            {
+              timeoutMs: 20000,
+              timeoutMessage: "Loading workspace folders timed out",
+            }
+          );
+          folders = payload?.folders || [];
+          selectedWorkspacePath =
+            preferredFolderPath && folders.some((entry) => entry.path === preferredFolderPath)
+              ? preferredFolderPath
+              : folders[0]?.path || "";
+          workspaceHint.textContent = selectedWorkspacePath
+            ? t("currentWorkspace", { path: selectedWorkspacePath })
+            : t("noWorkspaceAvailable");
+          renderWorkspaceOptions();
+          await loadFiles();
+        } catch (error) {
+          workspaceHint.textContent = t("failedLoadWorkspaces");
+          window.alert(error instanceof Error ? error.message : String(error));
+        } finally {
+          loadingFolders = false;
+          renderWorkspaceOptions();
+          renderFileList();
+          setBusy();
         }
       };
 
@@ -1972,6 +2232,157 @@ function renderShimJs() {
         renderFileList();
       });
 
+      driveSelect.addEventListener("change", () => {
+        searchKeyword = "";
+        searchInput.value = "";
+        updateQueuedUploadFiles([]);
+        loadFoldersForDrive(driveSelect.value).catch(fail);
+      });
+
+      workspaceSelect.addEventListener("change", async () => {
+        if (workspaceSelect.value === "__create_workspace__") {
+          if (!selectedDrive) {
+            window.alert(t("selectDriveFirst"));
+            renderWorkspaceOptions();
+            return;
+          }
+
+          const folderName = window.prompt(t("promptNewFolderName"), "");
+          if (folderName === null) {
+            renderWorkspaceOptions();
+            return;
+          }
+
+          const trimmedName = folderName.trim();
+          if (!trimmedName) {
+            window.alert(t("emptyNewFolderName"));
+            renderWorkspaceOptions();
+            return;
+          }
+
+          loadingFolders = true;
+          setBusy();
+          try {
+            const result = await withBridgeUiRecovery(
+              () => createWorkspaceFolder(selectedDrive, trimmedName),
+              () => {
+                loadingFolders = false;
+                renderWorkspaceOptions();
+                setBusy();
+              },
+              {
+                timeoutMs: 20000,
+                timeoutMessage: "Creating workspace timed out",
+              }
+            );
+            if (!result?.ok || !result.path) {
+              window.alert(result?.error || t("failedCreateWorkspace"));
+              renderWorkspaceOptions();
+              return;
+            }
+            await loadFoldersForDrive(selectedDrive, result.path);
+          } catch (error) {
+            window.alert(error instanceof Error ? error.message : String(error));
+          } finally {
+            loadingFolders = false;
+            renderWorkspaceOptions();
+            setBusy();
+          }
+          return;
+        }
+
+        selectedWorkspacePath = workspaceSelect.value;
+        saveLastPickedComposerFolder(selectedWorkspacePath);
+        searchKeyword = "";
+        searchInput.value = "";
+        updateQueuedUploadFiles([]);
+        loadFiles().catch(fail);
+      });
+
+      refreshButton.addEventListener("click", () => {
+        loadFoldersForDrive(driveSelect.value, selectedWorkspacePath).catch(fail);
+      });
+
+      uploadInput.addEventListener("change", () => {
+        updateQueuedUploadFiles(uploadInput.files || []);
+      });
+
+      dropZone.addEventListener("click", () => {
+        if (!dropZone.disabled) {
+          uploadInput.click();
+        }
+      });
+
+      const setDropZoneActive = (active) => {
+        dropZone.style.borderColor = active ? "#6ea8fe" : "#4d5a86";
+        dropZone.style.background = active ? "#15203a" : "#0f1320";
+      };
+
+      dropZone.addEventListener("dragenter", (event) => {
+        event.preventDefault();
+        if (!dropZone.disabled) {
+          setDropZoneActive(true);
+        }
+      });
+      dropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        if (!dropZone.disabled) {
+          setDropZoneActive(true);
+        }
+      });
+      dropZone.addEventListener("dragleave", (event) => {
+        event.preventDefault();
+        if (event.target === dropZone) {
+          setDropZoneActive(false);
+        }
+      });
+      dropZone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        setDropZoneActive(false);
+        if (dropZone.disabled) {
+          return;
+        }
+        updateQueuedUploadFiles(event.dataTransfer?.files || []);
+      });
+
+      uploadButton.addEventListener("click", async () => {
+        if (!selectedWorkspacePath) {
+          window.alert(t("selectWorkspaceFirst"));
+          return;
+        }
+        const selectedFiles = [...queuedUploadFiles];
+        if (selectedFiles.length === 0) {
+          window.alert(t("chooseFilesFirst"));
+          return;
+        }
+
+        loadingFiles = true;
+        setBusy();
+        try {
+          await withBridgeUiRecovery(
+            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles),
+            () => {
+              loadingFiles = false;
+              setBusy();
+            },
+            {
+              timeoutMs: 30000,
+              timeoutMessage: "Uploading workspace files timed out",
+            }
+          );
+          saveLastPickedRoot(selectedDrive);
+          saveLastPickedComposerFolder(selectedWorkspacePath);
+          uploadInput.value = "";
+          updateQueuedUploadFiles([]);
+          await loadFiles();
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : String(error));
+        } finally {
+          loadingFiles = false;
+          setBusy();
+        }
+      });
+
       closeButton.addEventListener("click", finish);
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay && !attaching) {
@@ -1981,9 +2392,10 @@ function renderShimJs() {
 
       document.addEventListener("keydown", onKeyDown, true);
       document.body.appendChild(overlay);
+      renderWorkspaceOptions();
       setBusy();
       renderFileList();
-      loadFiles().catch(fail);
+      loadFoldersForDrive(selectedDrive, selectedWorkspacePath).catch(fail);
     });
   };
 
