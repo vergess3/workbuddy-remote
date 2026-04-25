@@ -550,7 +550,10 @@ function renderShimJs() {
       }
     };
 
-    return withTimeout(Promise.resolve().then(runner), timeoutMs, timeoutMessage).catch((error) => {
+    const task = Promise.resolve().then(runner);
+    const guardedTask = timeoutMs > 0 ? withTimeout(task, timeoutMs, timeoutMessage) : task;
+
+    return guardedTask.catch((error) => {
       recover();
       throw error;
     });
@@ -1311,31 +1314,19 @@ function renderShimJs() {
     return response.json();
   };
 
-  const arrayBufferToBase64 = (buffer) => {
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...chunk);
-    }
-    return btoa(binary);
-  };
-
   const uploadWorkspaceFiles = async (folderPath, files) => {
     for (const file of files) {
-      const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
-      const response = await fetch("/bridge/workspace-files", {
+      const params = new URLSearchParams({
+        folderPath,
+        fileName: file.name,
+      });
+      const response = await fetch("/bridge/workspace-files?" + params.toString(), {
         method: "POST",
         cache: "no-store",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": file.type || "application/octet-stream",
         },
-        body: JSON.stringify({
-          folderPath,
-          fileName: file.name,
-          contentBase64,
-        }),
+        body: file,
       });
 
       if (!response.ok) {
@@ -2110,8 +2101,7 @@ function renderShimJs() {
                   setBusy();
                 },
                 {
-                  timeoutMs: 20000,
-                  timeoutMessage: "Fetching workspace file timed out",
+                  timeoutMs: 0,
                 }
               );
               const file = new File([blob], entry.name, {
@@ -2366,8 +2356,7 @@ function renderShimJs() {
               setBusy();
             },
             {
-              timeoutMs: 30000,
-              timeoutMessage: "Uploading workspace files timed out",
+              timeoutMs: 0,
             }
           );
           saveLastPickedRoot(selectedDrive);
@@ -3255,8 +3244,7 @@ function renderShimJs() {
               setBusy();
             },
             {
-              timeoutMs: 30000,
-              timeoutMessage: "Uploading workspace files timed out",
+              timeoutMs: 0,
             }
           );
           uploadInput.value = "";

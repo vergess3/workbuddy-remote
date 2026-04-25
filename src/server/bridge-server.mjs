@@ -269,11 +269,10 @@ function createRequestHandler(runtime, auth) {
         }
 
         if (req.method === "POST") {
-          const payload = await readJsonBody(req);
           const result = await uploadWorkspaceFile(
-            payload?.folderPath,
-            payload?.fileName,
-            payload?.contentBase64
+            requestUrl.searchParams.get("folderPath"),
+            requestUrl.searchParams.get("fileName"),
+            req
           );
           json(res, 200, result);
           return;
@@ -299,14 +298,13 @@ function createRequestHandler(runtime, auth) {
         const targetPath = requestUrl.searchParams.get("targetPath");
         const { normalizedPath, stats } = await resolveWorkspaceFilePath(targetPath);
         const fileName = path.win32.basename(normalizedPath);
-        const fileBuffer = await fs.readFile(normalizedPath);
         res.writeHead(200, {
           "Content-Type": contentTypeFor(normalizedPath),
           "Cache-Control": NO_STORE_CACHE_CONTROL,
-          "Content-Length": stats.size || fileBuffer.byteLength,
+          "Content-Length": stats.size,
           "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
         });
-        res.end(fileBuffer);
+        await pipeline(createReadStream(normalizedPath), res);
         return;
       }
 
@@ -372,6 +370,11 @@ function createRequestHandler(runtime, auth) {
 
       json(res, 404, { error: "Not found" });
     } catch (error) {
+      if (res.headersSent) {
+        res.destroy(error);
+        return;
+      }
+
       json(res, 500, {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -497,6 +500,8 @@ async function startBridgeServer(runtime, options) {
   }
 
   const server = http.createServer(createRequestHandler(runtime, auth));
+  server.requestTimeout = 0;
+  server.setTimeout(0);
   attachWebSocketServer(server, runtime, auth);
 
   await new Promise((resolve) => {

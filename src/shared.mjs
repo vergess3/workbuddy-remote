@@ -525,30 +525,6 @@ async function listWorkspaceEntries(folderPath) {
   };
 }
 
-async function uploadWorkspaceFile(folderPath, fileName, contentBase64) {
-  const { normalizedPath } = await resolveWorkspaceFolderPath(folderPath);
-  const validation = validateWorkspaceFileName(fileName);
-  if (!validation.ok) {
-    return validation;
-  }
-
-  if (typeof contentBase64 !== "string" || !contentBase64) {
-    return {
-      ok: false,
-      error: "File content is empty.",
-    };
-  }
-
-  const targetPath = path.win32.join(normalizedPath, validation.fileName);
-  const contentBuffer = Buffer.from(contentBase64, "base64");
-  await fs.writeFile(targetPath, contentBuffer);
-  return {
-    ok: true,
-    path: targetPath,
-    name: validation.fileName,
-  };
-}
-
 async function deleteWorkspaceEntry(targetPath) {
   const normalizedPath = normalizeWindowsPath(targetPath);
   if (!normalizedPath) {

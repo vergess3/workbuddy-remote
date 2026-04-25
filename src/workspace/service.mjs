@@ -1,6 +1,8 @@
 import path from "node:path";
 import os from "node:os";
-import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { promises as fs, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { WORKSPACE_ROOT_FOLDER_NAME } from "../shared.mjs";
 import { loadConfig } from "../config.mjs";
 
@@ -354,22 +356,27 @@ async function listWorkspaceEntries(folderPath) {
   };
 }
 
-async function uploadWorkspaceFile(folderPath, fileName, contentBase64) {
+async function uploadWorkspaceFile(folderPath, fileName, readable) {
   const { normalizedPath } = await resolveWorkspaceFolderPath(folderPath);
   const validation = validateWorkspaceFileName(fileName);
   if (!validation.ok) {
     return validation;
   }
 
-  if (typeof contentBase64 !== "string" || !contentBase64) {
-    return {
-      ok: false,
-      error: "File content is empty.",
-    };
+  const targetPath = path.win32.join(normalizedPath, validation.fileName);
+  const tempDir = path.win32.join(normalizedPath, `.workbuddy-upload-${randomUUID()}`);
+  const tempPath = path.win32.join(tempDir, "payload");
+
+  await fs.mkdir(tempDir);
+  try {
+    await pipeline(readable, createWriteStream(tempPath, { flags: "wx" }));
+    await fs.rename(tempPath, targetPath);
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 
-  const targetPath = path.win32.join(normalizedPath, validation.fileName);
-  await fs.writeFile(targetPath, Buffer.from(contentBase64, "base64"));
+  await fs.rmdir(tempDir).catch(() => {});
   return {
     ok: true,
     path: targetPath,
