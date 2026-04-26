@@ -27,7 +27,7 @@ Key requirements:
 
 ## Quick Start
 
-> **Installation Tip**: Clone this repository into your WorkBuddy directory, preferably under the `tools` folder (e.g., `C:\Apps\WorkBuddy\tools\workbuddy-remote\`) for easier path management and maintenance.
+> **Installation Tip**: Clone this repository into a directory alongside WorkBuddy (e.g., C:\Apps\workbuddy-remote\, at the same level as the WorkBuddy folder) for easier path management and maintenance.
 
 
 ### Option 1: Double-click launch
