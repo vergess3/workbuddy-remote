@@ -32,8 +32,6 @@ const HTML_CACHE_CONTROL = "no-cache";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATED_STATIC_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const COMPRESSIBLE_EXTENSIONS = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg"]);
-const MAX_COMPRESSED_STATIC_ASSET_BYTES = 1024 * 1024;
-const BOOTSTRAP_CONFIG_TIMEOUT_MS = 12000;
 
 function isCompressibleAsset(filePath) {
   return COMPRESSIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
@@ -83,28 +81,6 @@ function isModifiedSinceMatch(req, stats) {
   return Math.trunc(stats.mtimeMs / 1000) <= Math.trunc(parsed / 1000);
 }
 
-function hasUsableRuntimeConfig(config) {
-  return Boolean(config?.appRoot && config?.product && config?.nls);
-}
-
-function withTimeout(promise, timeoutMs, message) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(message));
-    }, timeoutMs);
-
-    Promise.resolve(promise)
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
 function writeNotModified(res, headers = {}) {
   res.writeHead(304, headers);
   res.end();
@@ -134,10 +110,7 @@ async function sendStaticAsset(req, res, filePath, stats, cacheControl) {
     return;
   }
 
-  const encoding =
-    stats.size <= MAX_COMPRESSED_STATIC_ASSET_BYTES && isCompressibleAsset(filePath)
-      ? pickContentEncoding(req)
-      : null;
+  const encoding = isCompressibleAsset(filePath) ? pickContentEncoding(req) : null;
   if (!encoding) {
     res.writeHead(200, {
       ...baseHeaders,
@@ -174,7 +147,7 @@ function sendVersionedScript(req, res, payload, { etag, cacheControl }) {
     return;
   }
 
-  const encoding = body.byteLength <= MAX_COMPRESSED_STATIC_ASSET_BYTES ? pickContentEncoding(req) : null;
+  const encoding = pickContentEncoding(req);
   if (!encoding) {
     writeBuffer(res, 200, body, baseHeaders);
     return;
@@ -242,15 +215,7 @@ function createRequestHandler(runtime, auth) {
       }
 
       if (requestUrl.pathname === "/bridge/bootstrap") {
-        if (!hasUsableRuntimeConfig(runtime.getCachedRuntimeConfig())) {
-          await withTimeout(
-            runtime.refreshRuntimeConfig(),
-            BOOTSTRAP_CONFIG_TIMEOUT_MS,
-            "Timed out while loading WorkBuddy runtime config."
-          );
-        } else {
-          runtime.refreshRuntimeConfigSafe().catch(() => {});
-        }
+        runtime.refreshRuntimeConfigSafe().catch(() => {});
         runtime.refreshAuthSessionSafe().catch(() => {});
         json(res, 200, {
           ...runtime.getBootstrapPayload(),
