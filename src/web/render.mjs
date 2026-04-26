@@ -146,6 +146,7 @@ function renderShimJs() {
       selectedFiles: "已选择：{names}{suffix}",
       selectedFilesHint:
         "已选择文件，点击这里可重新选择，或直接继续拖拽替换。",
+      uploadProgress: "正在上传：{percent}% ({loaded} / {total})",
       currentWorkspace: "当前工作空间：{path}",
       noWorkspaceAvailable: "还没有可用的工作空间。",
       failedLoadWorkspaces: "加载工作空间失败。",
@@ -238,6 +239,7 @@ function renderShimJs() {
       selectedFiles: "Selected: {names}{suffix}",
       selectedFilesHint:
         "Files selected. Click here to choose again, or drag more files here to replace them.",
+      uploadProgress: "Uploading: {percent}% ({loaded} / {total})",
       currentWorkspace: "Current workspace: {path}",
       noWorkspaceAvailable: "No workspace is available yet.",
       failedLoadWorkspaces: "Failed to load workspaces.",
@@ -1314,29 +1316,51 @@ function renderShimJs() {
     return response.json();
   };
 
-  const uploadWorkspaceFiles = async (folderPath, files) => {
-    for (const file of files) {
+  const uploadWorkspaceFile = (folderPath, file, onProgress) => {
+    return new Promise((resolve, reject) => {
       const params = new URLSearchParams({
         folderPath,
         fileName: file.name,
       });
-      const response = await fetch("/bridge/workspace-files?" + params.toString(), {
-        method: "POST",
-        cache: "no-store",
-        headers: {
-          "Content-Type": file.type || "application/octet-stream",
-        },
-        body: file,
+      const request = new XMLHttpRequest();
+      request.open("POST", "/bridge/workspace-files?" + params.toString());
+      request.responseType = "json";
+      request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress?.(event.loaded);
+        }
+      };
+      request.onload = () => {
+        if (request.status < 200 || request.status >= 300) {
+          reject(new Error("Failed to upload file"));
+          return;
+        }
+
+        const result = request.response;
+        if (!result?.ok) {
+          reject(new Error(result?.error || "Upload failed"));
+          return;
+        }
+        onProgress?.(file.size);
+        resolve(result);
+      };
+      request.onerror = () => reject(new Error("Failed to upload file"));
+      request.send(file);
+    });
+  };
+
+  const uploadWorkspaceFiles = async (folderPath, files, onProgress) => {
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    let completedBytes = 0;
+    for (const file of files) {
+      await uploadWorkspaceFile(folderPath, file, (loadedBytes) => {
+        onProgress?.({
+          loadedBytes: completedBytes + loadedBytes,
+          totalBytes,
+        });
       });
-
-      if (!response.ok) {
-        throw new Error("Failed to upload file");
-      }
-
-      const result = await response.json();
-      if (!result?.ok) {
-        throw new Error(result?.error || "Upload failed");
-      }
+      completedBytes += file.size;
     }
   };
 
@@ -1636,6 +1660,46 @@ function renderShimJs() {
     return (value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unitIndex];
   };
 
+  const createUploadProgressControl = () => {
+    const element = document.createElement("div");
+    element.style.cssText = "display:none;gap:6px;flex-direction:column;";
+
+    const text = document.createElement("div");
+    text.style.cssText = "font-size:12px;color:#9aa4c7;";
+    element.appendChild(text);
+
+    const track = document.createElement("div");
+    track.style.cssText = "height:6px;border-radius:999px;background:#202842;overflow:hidden;";
+    element.appendChild(track);
+
+    const bar = document.createElement("div");
+    bar.style.cssText = "height:100%;width:0%;background:#31c48d;";
+    track.appendChild(bar);
+
+    return {
+      element,
+      set(progress) {
+        if (!progress || !progress.totalBytes) {
+          element.style.display = "none";
+          bar.style.width = "0%";
+          return;
+        }
+
+        const percent = Math.min(
+          100,
+          Math.max(0, Math.round((progress.loadedBytes / progress.totalBytes) * 100))
+        );
+        element.style.display = "flex";
+        text.textContent = t("uploadProgress", {
+          percent,
+          loaded: formatFileSize(progress.loadedBytes),
+          total: formatFileSize(progress.totalBytes),
+        });
+        bar.style.width = percent + "%";
+      },
+    };
+  };
+
   const findActiveComposerEditor = () => {
     if (document.activeElement instanceof HTMLElement) {
       const activeElement = document.activeElement;
@@ -1844,7 +1908,7 @@ function renderShimJs() {
 
       const workspaceHint = document.createElement("div");
       workspaceHint.style.cssText =
-        "padding:10px 14px;border:1px solid #2c3350;border-radius:10px;background:#11162a;color:#9aa4c7;";
+        "display:none;";
       workspaceHint.textContent = t("currentWorkspace", { path: selectedWorkspacePath });
       body.appendChild(workspaceHint);
 
@@ -1912,6 +1976,9 @@ function renderShimJs() {
       uploadHint.style.cssText = "font-size:12px;color:#7d89b4;";
       uploadHint.textContent = t("noFilesSelected");
       uploadField.appendChild(uploadHint);
+
+      const uploadProgress = createUploadProgressControl();
+      uploadField.appendChild(uploadProgress.element);
 
       const uploadButton = document.createElement("button");
       uploadButton.type = "button";
@@ -2001,6 +2068,7 @@ function renderShimJs() {
 
       const updateQueuedUploadFiles = (nextFiles) => {
         queuedUploadFiles = Array.from(nextFiles || []);
+        setUploadProgress(null);
         if (queuedUploadFiles.length === 0) {
           uploadHint.textContent = t("noFilesSelected");
           dropZone.textContent = t("dropFilesHint");
@@ -2015,6 +2083,8 @@ function renderShimJs() {
         }
         setBusy();
       };
+
+      const setUploadProgress = uploadProgress.set;
 
       const getFilteredFiles = () => {
         if (!searchKeyword) {
@@ -2348,9 +2418,13 @@ function renderShimJs() {
 
         loadingFiles = true;
         setBusy();
+        setUploadProgress({
+          loadedBytes: 0,
+          totalBytes: selectedFiles.reduce((sum, file) => sum + file.size, 0),
+        });
         try {
           await withBridgeUiRecovery(
-            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles),
+            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles, setUploadProgress),
             () => {
               loadingFiles = false;
               setBusy();
@@ -2368,6 +2442,7 @@ function renderShimJs() {
           window.alert(error instanceof Error ? error.message : String(error));
         } finally {
           loadingFiles = false;
+          setUploadProgress(null);
           setBusy();
         }
       });
@@ -2775,7 +2850,7 @@ function renderShimJs() {
       topRow.appendChild(refreshButton);
 
       const workspaceHint = document.createElement("div");
-      workspaceHint.style.cssText = "padding:10px 14px;border:1px solid #2c3350;border-radius:10px;background:#11162a;color:#9aa4c7;";
+      workspaceHint.style.cssText = "display:none;";
       workspaceHint.textContent = t("workspaceActionHint");
       body.appendChild(workspaceHint);
 
@@ -2818,6 +2893,9 @@ function renderShimJs() {
       uploadHint.style.cssText = "font-size:12px;color:#7d89b4;";
       uploadHint.textContent = t("noFilesSelected");
       uploadField.appendChild(uploadHint);
+
+      const uploadProgress = createUploadProgressControl();
+      uploadField.appendChild(uploadProgress.element);
 
       const uploadButton = document.createElement("button");
       uploadButton.type = "button";
@@ -2973,6 +3051,7 @@ function renderShimJs() {
 
       const updateQueuedUploadFiles = (nextFiles) => {
         queuedUploadFiles = Array.from(nextFiles || []);
+        setUploadProgress(null);
         if (queuedUploadFiles.length === 0) {
           uploadHint.textContent = t("noFilesSelected");
           dropZone.textContent = t("dropFilesHint");
@@ -2987,6 +3066,8 @@ function renderShimJs() {
         }
         setBusy();
       };
+
+      const setUploadProgress = uploadProgress.set;
 
       const loadFilesForWorkspace = async (folderPath) => {
         selectedWorkspacePath = folderPath || "";
@@ -3236,9 +3317,13 @@ function renderShimJs() {
 
         loadingFiles = true;
         setBusy();
+        setUploadProgress({
+          loadedBytes: 0,
+          totalBytes: selectedFiles.reduce((sum, file) => sum + file.size, 0),
+        });
         try {
           await withBridgeUiRecovery(
-            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles),
+            () => uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles, setUploadProgress),
             () => {
               loadingFiles = false;
               setBusy();
@@ -3254,6 +3339,7 @@ function renderShimJs() {
           window.alert(error instanceof Error ? error.message : String(error));
         } finally {
           loadingFiles = false;
+          setUploadProgress(null);
           setBusy();
         }
       });
