@@ -28,7 +28,7 @@
 ## 快速开始
 
 
-> **安装位置建议**：将本项目克隆到 WorkBuddy 目录内，建议放在其 `tools` 文件夹下（如 `C:\Apps\WorkBuddy\tools\workbuddy-remote\`），便于路径管理和维护。
+> **安装位置建议**：将本项目克隆到 WorkBuddy 平级目录（如 C:\Apps\workbuddy-remote\，与 WorkBuddy 文件夹并列），便于路径管理和维护。
 
 
 ### 方式 1：双击启动
