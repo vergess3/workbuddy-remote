@@ -279,6 +279,14 @@ function createRequestHandler(runtime, auth) {
         return;
       }
 
+      if (requestUrl.pathname === "/bridge/workspace-context") {
+        json(res, 200, {
+          ok: true,
+          paths: runtime.getWorkspaceContextCandidates(),
+        });
+        return;
+      }
+
       if (requestUrl.pathname === "/bridge/workspace-folders") {
         if (req.method === "GET") {
           const rootPath = requestUrl.searchParams.get("rootPath");

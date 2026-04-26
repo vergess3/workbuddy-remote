@@ -26,7 +26,7 @@
 ## 文件系统权限
 
 - 对 `%APPDATA%\WorkBuddy` 具有读写权限
-- 对 `C:\Users\<当前用户>\WBWorkspaces` 具有读写权限，或者对 `workspaceRoots` 中列出的目录具有读写权限
+- 对 `C:\Users\<当前用户>\WBWorkspaces` 和 `C:\Users\<当前用户>\WorkBuddy` 具有读写权限，或者对 `workspaceRoots` 中列出的目录具有读写权限
 
 ## 默认端口
 

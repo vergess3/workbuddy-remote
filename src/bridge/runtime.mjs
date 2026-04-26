@@ -101,6 +101,7 @@ function createWorkSignalResult() {
     conversationIds: new Set(),
     activeConversationIds: new Set(),
     terminalConversationIds: new Set(),
+    workspacePaths: new Set(),
   };
 }
 
@@ -119,6 +120,24 @@ function getConversationIdCandidates(value) {
 
 function getRealConversationId(value) {
   return getConversationIdCandidates(value).find((id) => !isTransientConversationId(id)) || null;
+}
+
+function normalizeWorkspacePathSignal(value) {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  for (const candidate of [value.path, value.fsPath, value.cwd, value.workspacePath]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
 }
 
 function readTimestampMs(value) {
@@ -198,6 +217,12 @@ function collectSignalsFromObject(value, result) {
   for (const key of WORK_SIGNAL_KEYS) {
     if (key in value && hasMeaningfulValue(value[key])) {
       result.hasMarker = true;
+      if (key === "cwd" || key === "workspacePath" || key === "workspaceFolder") {
+        const workspacePath = normalizeWorkspacePathSignal(value[key]);
+        if (workspacePath) {
+          result.workspacePaths.add(workspacePath);
+        }
+      }
       if (!CONVERSATION_ID_KEYS.has(key) && !terminalConversation) {
         result.hasUnknownWork = true;
       }
@@ -214,8 +239,10 @@ function collectWorkSignals(value) {
 
   collectSignalsFromObject(value, result);
   collectSignalsFromObject(value.params, result);
+  collectSignalsFromObject(value.params?.params, result);
   collectSignalsFromObject(value.payload, result);
   collectSignalsFromObject(value.payload?.params, result);
+  collectSignalsFromObject(value.payload?.params?.params, result);
   collectSignalsFromObject(value.session, result);
 
   return result;
@@ -929,6 +956,50 @@ class BridgeRuntime {
     };
   }
 
+  getWorkspaceContextCandidates() {
+    const candidates = [];
+    for (const state of this.windowStates.values()) {
+      const paths = [...(state.workspacePaths || [])];
+      if (paths.length === 0) {
+        continue;
+      }
+
+      const active = state.activeSocketIds.size > 0;
+      const lastActivityAt = Math.max(
+        state.lastWorkspaceAt || 0,
+        state.lastWorkAt || 0,
+        state.lastActivityAt || 0,
+        state.lastAttachedAt || 0
+      );
+      for (const workspacePath of paths) {
+        candidates.push({
+          path: workspacePath,
+          windowId: state.windowId,
+          active,
+          hasWork: state.hasWork,
+          lastActivityAt,
+        });
+      }
+    }
+
+    candidates.sort(
+      (left, right) =>
+        Number(right.active) - Number(left.active) ||
+        Number(right.hasWork) - Number(left.hasWork) ||
+        right.lastActivityAt - left.lastActivityAt
+    );
+
+    const seen = new Set();
+    return candidates.filter((candidate) => {
+      const key = String(candidate.path || "").toLowerCase();
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }
+
   canRestartCurrentApp() {
     return (
       process.platform === "win32" &&
@@ -1062,9 +1133,11 @@ class BridgeRuntime {
         activeConversationIds: new Set(),
         terminalConversationIds: new Set(),
         staleConversationIds: new Set(),
+        workspacePaths: new Set(),
         hasWork: false,
         lastActivityAt: 0,
         lastWorkAt: 0,
+        lastWorkspaceAt: 0,
         lastUnknownWorkAt: 0,
         lastAttachedAt: 0,
         lastDetachedAt: 0,
@@ -1089,9 +1162,11 @@ class BridgeRuntime {
       activeConversationIds: [...state.activeConversationIds],
       terminalConversationIds: [...state.terminalConversationIds],
       staleConversationIds: [...(state.staleConversationIds || [])],
+      workspacePaths: [...(state.workspacePaths || [])],
       hasWork: state.hasWork,
       lastActivityAt: state.lastActivityAt,
       lastWorkAt: state.lastWorkAt,
+      lastWorkspaceAt: state.lastWorkspaceAt,
       lastUnknownWorkAt: state.lastUnknownWorkAt,
       lastAttachedAt: state.lastAttachedAt,
       lastDetachedAt: state.lastDetachedAt,
@@ -1231,6 +1306,14 @@ class BridgeRuntime {
 
     const now = Date.now();
     const wasProtected = state.hasWork;
+
+    if (signals.workspacePaths?.size > 0) {
+      state.workspacePaths ||= new Set();
+      for (const workspacePath of signals.workspacePaths) {
+        state.workspacePaths.add(workspacePath);
+      }
+      state.lastWorkspaceAt = now;
+    }
 
     for (const conversationId of signals.conversationIds) {
       state.conversationIds.add(conversationId);
@@ -2275,6 +2358,12 @@ class BridgeRuntime {
       payload: summarizeValue(payload),
     });
 
+    const openFolderRequest = this.extractOpenFolderRequest(payload);
+    if (openFolderRequest) {
+      this.forwardOpenFolder(portId, openFolderRequest);
+      return;
+    }
+
     const openExternalRequest = this.extractOpenExternalRequest(payload);
     if (openExternalRequest) {
       this.forwardOpenExternal(portId, openExternalRequest);
@@ -2312,6 +2401,14 @@ class BridgeRuntime {
     return this.findOpenExternalRequest(payload.value);
   }
 
+  extractOpenFolderRequest(payload) {
+    if (payload?.kind !== "json") {
+      return null;
+    }
+
+    return this.findOpenFolderRequest(payload.value);
+  }
+
   findOpenExternalRequest(value) {
     if (!value || typeof value !== "object") {
       return null;
@@ -2325,6 +2422,27 @@ class BridgeRuntime {
     const children = Array.isArray(value) ? value : Object.values(value);
     for (const child of children) {
       const nestedMatch = this.findOpenExternalRequest(child);
+      if (nestedMatch) {
+        return nestedMatch;
+      }
+    }
+
+    return null;
+  }
+
+  findOpenFolderRequest(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const directMatch = this.tryParseOpenFolderRequest(value);
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+      const nestedMatch = this.findOpenFolderRequest(child);
       if (nestedMatch) {
         return nestedMatch;
       }
@@ -2350,6 +2468,25 @@ class BridgeRuntime {
     }
 
     return this.extractBackendOpenExternal(value);
+  }
+
+  tryParseOpenFolderRequest(value) {
+    const rpcPayload =
+      value?.type === "acp-rpc" && value?.payload && typeof value.payload === "object"
+        ? value.payload
+        : value;
+
+    if (rpcPayload?.method === "__backend__") {
+      const backendMatch = this.extractBackendOpenFolder(rpcPayload.params);
+      if (backendMatch) {
+        return {
+          ...backendMatch,
+          rpcId: rpcPayload.id,
+        };
+      }
+    }
+
+    return this.extractBackendOpenFolder(value);
   }
 
   extractBackendOpenExternal(value) {
@@ -2383,6 +2520,37 @@ class BridgeRuntime {
     return null;
   }
 
+  extractBackendOpenFolder(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    if (value.type === "backend:open-folder") {
+      const folderPath = value.params?.folderPath ?? value.folderPath;
+      if (typeof folderPath === "string" && folderPath) {
+        return {
+          folderPath,
+          backendRequestId: value.requestId,
+        };
+      }
+    }
+
+    if (value.type === "backend" && value.params && typeof value.params === "object") {
+      const nested = value.params;
+      if (nested.type === "backend:open-folder") {
+        const folderPath = nested.params?.folderPath ?? nested.folderPath;
+        if (typeof folderPath === "string" && folderPath) {
+          return {
+            folderPath,
+            backendRequestId: value.requestId ?? nested.requestId,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
   buildOpenExternalResult(request) {
     if (request?.rpcId !== undefined) {
       return {
@@ -2403,9 +2571,34 @@ class BridgeRuntime {
     };
   }
 
-  isLocalPathOpenRequest(request) {
+  buildOpenFolderResult(request) {
+    return this.buildOpenExternalResult(request);
+  }
+
+  resolveLocalPathOpenRequest(request) {
     const url = typeof request?.url === "string" ? request.url.trim() : "";
-    return Boolean(url && (/^file:/iu.test(url) || /^[A-Za-z]:[\\/]/u.test(url)));
+    if (!url) {
+      return "";
+    }
+
+    if (/^(?:file|vscode-file):/iu.test(url)) {
+      try {
+        if (/^file:/iu.test(url)) {
+          return fileURLToPath(url);
+        }
+
+        const parsedUrl = new URL(url);
+        let pathname = decodeURIComponent(parsedUrl.pathname || "");
+        if (/^\/[A-Za-z]:\//u.test(pathname)) {
+          pathname = pathname.slice(1);
+        }
+        return pathname.replace(/\//g, "\\");
+      } catch {
+        return url;
+      }
+    }
+
+    return /^[A-Za-z]:[\\/]/u.test(url) ? url : "";
   }
 
   forwardOpenExternal(portId, request) {
@@ -2414,18 +2607,20 @@ class BridgeRuntime {
       return;
     }
 
+    const localTargetPath = this.resolveLocalPathOpenRequest(request);
     logger.info("open_external.forward", "Forwarding openExternal request to browser", {
       portId,
       url: request.url,
       rpcId: request.rpcId,
       backendRequestId: request.backendRequestId,
+      redirectedToFileManager: Boolean(localTargetPath),
     });
     this.sendToSocket(
       socket,
-      this.isLocalPathOpenRequest(request)
+      localTargetPath
         ? {
             type: "open-file-manager",
-            targetPath: request.url,
+            targetPath: localTargetPath,
           }
         : {
             type: "open-external",
@@ -2436,6 +2631,35 @@ class BridgeRuntime {
       type: "port-message",
       portId,
       payload: encodePayloadForTransport(this.buildOpenExternalResult(request)),
+    });
+  }
+
+  forwardOpenFolder(portId, request) {
+    const socket = this.portClients.get(portId);
+    if (!socket) {
+      return;
+    }
+
+    const localTargetPath = this.resolveLocalPathOpenRequest({ url: request.folderPath });
+    logger.info("open_folder.forward", "Forwarding openFolder request to browser file manager", {
+      portId,
+      folderPath: request.folderPath,
+      rpcId: request.rpcId,
+      backendRequestId: request.backendRequestId,
+      redirectedToFileManager: Boolean(localTargetPath),
+    });
+
+    if (localTargetPath) {
+      this.sendToSocket(socket, {
+        type: "open-file-manager",
+        targetPath: localTargetPath,
+      });
+    }
+
+    this.sendToSocket(socket, {
+      type: "port-message",
+      portId,
+      payload: encodePayloadForTransport(this.buildOpenFolderResult(request)),
     });
   }
 

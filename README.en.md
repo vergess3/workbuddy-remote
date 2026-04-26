@@ -96,7 +96,7 @@ Field notes:
 - `listenHost`: default bind host for the bridge launcher
 - `killWorkBuddyProcessesBeforeStart`: whether to kill all existing `WorkBuddy` processes before launch; defaults to `false`
 - `showReadyWindow`: whether to show the `WorkBuddy Remote Ready` popup after startup; defaults to `false`
-- `workspaceRoots`: optional list of allowed workspace root folders; when empty, the default is `C:\Users\<current-user>\WBWorkspaces`
+- `workspaceRoots`: optional list of allowed workspace root folders; when empty, the defaults are `C:\Users\<current-user>\WBWorkspaces` and `C:\Users\<current-user>\WorkBuddy`
 - `maskBridgeModelSecrets`: whether to hide the API address and API key inputs in the WorkBuddy-Remote browser page
 
 The launcher no longer writes bridge temp files or logs into the WorkBuddy installation directory by default.
@@ -158,7 +158,7 @@ If source IPs are not restricted by your firewall, it is still not recommended t
 
 ## Workspace Root Configuration
 
-By default, the file manager uses `C:\Users\<current-user>\WBWorkspaces`. For safety, the file manager is restricted to files under the configured workspace root directories only.
+By default, the file manager uses `C:\Users\<current-user>\WBWorkspaces` and `C:\Users\<current-user>\WorkBuddy`. For safety, the file manager is restricted to files under the configured workspace root directories only.
 
 If you want to limit the file manager to specific paths, edit [workbuddy-remote.config.json](./workbuddy-remote.config.json):
 

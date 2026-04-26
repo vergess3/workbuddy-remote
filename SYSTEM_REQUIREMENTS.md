@@ -24,7 +24,7 @@
 ## Filesystem Permissions
 
 - Read/write access to `%APPDATA%\WorkBuddy`
-- Read/write access to `C:\Users\<current-user>\WBWorkspaces`, or to the paths listed in `workspaceRoots`
+- Read/write access to `C:\Users\<current-user>\WBWorkspaces` and `C:\Users\<current-user>\WorkBuddy`, or to the paths listed in `workspaceRoots`
 
 ## Default Ports
 

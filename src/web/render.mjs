@@ -747,6 +747,13 @@ function renderShimJs() {
     } catch {}
   };
 
+  const getStoredRootPath = (roots) => {
+    const lastPickedRoot = loadLastPickedRoot();
+    return roots.some((entry) => entry.path === lastPickedRoot) ? lastPickedRoot : "";
+  };
+
+  const getFallbackRootPath = (roots) => getStoredRootPath(roots);
+
   const fetchWorkspaceRoots = async () => {
     const response = await fetch("/bridge/workspace-roots", { cache: "no-store" });
     if (!response.ok) {
@@ -767,6 +774,15 @@ function renderShimJs() {
     return response.json();
   };
 
+  const fetchWorkspaceContextCandidates = async () => {
+    const response = await fetch("/bridge/workspace-context", { cache: "no-store" });
+    if (!response.ok) {
+      return [];
+    }
+    const payload = await response.json();
+    return Array.isArray(payload?.paths) ? payload.paths : [];
+  };
+
   const createWorkspaceFolder = async (rootPath, name) => {
     const response = await fetch("/bridge/workspace-folders", {
       method: "POST",
@@ -783,10 +799,9 @@ function renderShimJs() {
   };
 
   const deriveInitialRoot = (defaultPath, roots) => {
-    const normalizedDefaultPath =
-      typeof defaultPath === "string" ? defaultPath.trim().toLowerCase() : "";
+    const normalizedDefaultPath = normalizeComparablePath(defaultPath);
     const matchedRoot = roots.find((entry) => {
-      const rootPath = String(entry?.path || "").toLowerCase();
+      const rootPath = normalizeComparablePath(entry?.path);
       return (
         normalizedDefaultPath &&
         (normalizedDefaultPath === rootPath ||
@@ -797,17 +812,23 @@ function renderShimJs() {
       return matchedRoot.path;
     }
 
-    const lastPickedRoot = loadLastPickedRoot();
-    return roots.some((entry) => entry.path === lastPickedRoot) ? lastPickedRoot : "";
+    return getStoredRootPath(roots);
   };
 
   const promptForRemoteFolderPath = async (defaultPath) => {
     const roots = await fetchWorkspaceRoots();
-    const initialRoot = deriveInitialRoot(defaultPath, roots);
+    const defaultTargetPath = normalizeLocalPathInput(defaultPath);
+    const autoSelection = await resolveAutoSelectedWorkspace(
+      roots,
+      defaultTargetPath
+    );
+    const initialRoot =
+      autoSelection.rootPath || deriveInitialRoot(defaultPath, roots) || getFallbackRootPath(roots);
+    const initialFolderPath = autoSelection.preferredFolderPath || "";
 
     return new Promise((resolve, reject) => {
       let selectedRootPath = initialRoot;
-      let selectedFolderPath = "";
+      let selectedFolderPath = initialFolderPath;
       let workspaceRoot = "";
       let folders = [];
       let filteredFolders = [];
@@ -1074,8 +1095,8 @@ function renderShimJs() {
 
         listWrapper.replaceChildren();
 
-        if (!selectedFolderPath || !folders.some((entry) => entry.path === selectedFolderPath)) {
-          selectedFolderPath = filteredFolders[0]?.path || folders[0]?.path || "";
+        if (selectedFolderPath && !folders.some((entry) => entry.path === selectedFolderPath)) {
+          selectedFolderPath = "";
         }
 
         if (!selectedRootPath) {
@@ -1178,7 +1199,7 @@ function renderShimJs() {
           selectedFolderPath =
             preferredFolderPath && folders.some((entry) => entry.path === preferredFolderPath)
               ? preferredFolderPath
-              : folders[0]?.path || "";
+              : "";
           workspaceHint.textContent = selectedFolderPath
             ? t("currentWorkspace", { path: selectedFolderPath })
             : workspaceRoot
@@ -1294,7 +1315,7 @@ function renderShimJs() {
       setBusy(false);
       renderWorkspaceOptions();
       applyFilter();
-      loadRootFolders(rootSelect.value).catch(fail);
+      loadRootFolders(rootSelect.value, initialFolderPath).catch(fail);
     });
   };
 
@@ -1392,16 +1413,6 @@ function renderShimJs() {
     return response.blob();
   };
 
-  const normalizeTaskTitle = (value) =>
-    String(value || "")
-      .replace(/\s+/g, " ")
-      .replace(
-        /\s*(just now|\d+\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago|刚刚|\d+\s*(秒|分钟|小时|天|周|月|年)前)\s*$/iu,
-        ""
-      )
-      .trim()
-      .toLowerCase();
-
   const isElementVisible = (element) => {
     if (!(element instanceof HTMLElement)) {
       return false;
@@ -1420,194 +1431,36 @@ function renderShimJs() {
     );
   };
 
-  const extractCurrentTaskTitle = () => {
-    const blacklist = new Set([
-      "WorkBuddy",
-      "文件管理",
-      "文件下载",
-      "选择文件夹",
-      "确认上传",
-      "关闭",
-      "刷新",
-      "技能",
-      "File Manager",
-      "File Download",
-      "Choose Folder",
-      "Upload",
-      "Close",
-      "Refresh",
-      "Skills",
-      "Craft",
-      "Claw",
-    ]);
-
-    const candidates = [];
-    for (const element of Array.from(document.querySelectorAll("body *"))) {
-      if (!(element instanceof HTMLElement) || !isElementVisible(element)) {
-        continue;
-      }
-
-      const text = element.innerText?.trim();
-      if (!text || text.length > 80 || blacklist.has(text)) {
-        continue;
-      }
-
-      const rect = element.getBoundingClientRect();
-      if (rect.left < 320 || rect.top > 180) {
-        continue;
-      }
-
-      if (/Claw Your Ideas Into Reality|Triggered Anywhere|Completed Locally/u.test(text)) {
-        continue;
-      }
-
-      if (/编辑\(E\)|帮助\(H\)|Edit\(E\)|Help\(H\)|Window/u.test(text)) {
-        continue;
-      }
-
-      const style = window.getComputedStyle(element);
-      const fontWeight = Number.parseInt(style.fontWeight || "400", 10) || 400;
-      const hasTitleClass = /title|header|name/u.test(element.className || "");
-      const tagBonus = /^H[1-6]$/u.test(element.tagName) ? 20 : 0;
-      const weightBonus = fontWeight >= 600 ? 20 : 0;
-      const classBonus = hasTitleClass ? 10 : 0;
-      const yBonus = Math.max(0, 140 - rect.top) / 10;
-      candidates.push({
-        text,
-        score: tagBonus + weightBonus + classBonus + yBonus,
-      });
+  const normalizeLocalPathInput = (value) => {
+    let text = String(value || "").trim();
+    if (!text) {
+      return "";
     }
 
-    candidates.sort((left, right) => right.score - left.score || left.text.length - right.text.length);
-    return candidates[0]?.text || "";
-  };
-
-  const extractConversationCardTitle = (container, workspaceName = "") => {
-    const blockedTexts = new Set(["Pin", "Rename", "Archive", workspaceName]);
-    const candidates = Array.from(
-      container.querySelectorAll("[class*='title'], span, div")
-    )
-      .map((element) => String(element.textContent || "").trim())
-      .filter((text) => {
-        if (!text || text.length > 80 || blockedTexts.has(text)) {
-          return false;
+    if (/^(?:file|vscode-file):/iu.test(text)) {
+      try {
+        const url = new URL(text);
+        if (url.protocol === "file:" || url.protocol === "vscode-file:") {
+          text = decodeURIComponent(url.pathname || "");
+          if (/^\\/[A-Za-z]:\\//u.test(text)) {
+            text = text.slice(1);
+          }
+          text = text.replace(/\\//g, "\\\\");
         }
-        return !/(just now|\d+\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago|刚刚|\d+\s*(秒|分钟|小时|天|周|月|年)前)$/iu.test(
-          text
-        );
-      });
+      } catch {
+        text = text.replace(/^(?:file|vscode-file):(\\/\\/\\/?)?/iu, "").replace(/\\//g, "\\\\");
+      }
+    }
 
-    candidates.sort((left, right) => right.length - left.length);
-    return candidates[0] || "";
+    return /^[A-Za-z]:[\\\\/]/u.test(text) ? text : "";
   };
 
-  const detectCurrentWorkspaceContext = () => {
-    const workspaceSections = Array.from(
-      document.querySelectorAll(".workspace-drag-item, .collapsible-section")
-    );
-
-    for (const section of workspaceSections) {
-      if (!(section instanceof HTMLElement)) {
-        continue;
-      }
-
-      const workspaceName =
-        section
-          .querySelector(
-            ".collapsible-section-label, .collapsible-section-title, [class*='collapsible-section-label'], [class*='_title_4140i_41']"
-          )
-          ?.textContent?.trim() || "";
-      if (!workspaceName) {
-        continue;
-      }
-
-      const activeCard = Array.from(
-        section.querySelectorAll(".conversation-agent-card, button")
-      ).find((element) => element.querySelector?.(".agent-card-rename-button"));
-
-      if (!activeCard) {
-        continue;
-      }
-
-      const taskTitle = extractConversationCardTitle(activeCard, workspaceName);
-      if (taskTitle) {
-        return {
-          taskTitle,
-          workspaceName,
-          distance: 0,
-        };
-      }
-    }
-
-    const taskTitle = extractCurrentTaskTitle();
-    const normalizedTitle = normalizeTaskTitle(taskTitle);
-    if (!normalizedTitle) {
-      return null;
-    }
-
-    const matches = [];
-
-    for (const section of workspaceSections) {
-      if (!(section instanceof HTMLElement)) {
-        continue;
-      }
-
-      const workspaceName =
-        section
-          .querySelector(
-            ".collapsible-section-label, .collapsible-section-title, [class*='collapsible-section-label'], [class*='_title_4140i_41']"
-          )
-          ?.textContent?.trim() || "";
-      if (!workspaceName) {
-        continue;
-      }
-
-      const cardTitles = Array.from(
-        section.querySelectorAll(".conversation-agent-card [class*='title'], .conversation-agent-card span")
-      )
-        .map((element) => normalizeTaskTitle(element.textContent))
-        .filter(Boolean);
-
-      if (cardTitles.includes(normalizedTitle)) {
-        const rect = section.getBoundingClientRect();
-        matches.push({
-          taskTitle,
-          workspaceName,
-          distance: Math.abs(rect.top - 260),
-        });
-      }
-    }
-
-    matches.sort((left, right) => left.distance - right.distance);
-    return matches[0] || null;
-  };
-
-  const findWorkspaceFolderByName = async (workspaceName, roots) => {
-    const normalizedName = String(workspaceName || "").trim().toLowerCase();
-    if (!normalizedName) {
-      return null;
-    }
-
-    for (const rootEntry of roots || []) {
-      const payload = await fetchWorkspaceFolders(rootEntry.path);
-      const matchedFolder = (payload?.folders || []).find(
-        (entry) => String(entry.name || "").trim().toLowerCase() === normalizedName
-      );
-      if (matchedFolder) {
-        return {
-          rootPath: rootEntry.path,
-          folder: matchedFolder,
-        };
-      }
-    }
-
-    return null;
-  };
-
-  const normalizeComparablePath = (value) =>
-    typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value.trim())
-      ? value.trim().replace(/\\//g, "\\\\").replace(/[\\\\]+$/g, "").toLowerCase()
+  const normalizeComparablePath = (value) => {
+    const normalizedPath = normalizeLocalPathInput(value);
+    return normalizedPath
+      ? normalizedPath.replace(/\\//g, "\\\\").replace(/[\\\\]+$/g, "").toLowerCase()
       : "";
+  };
 
   const isSameOrChildPath = (parentPath, childPath) => {
     const parent = normalizeComparablePath(parentPath);
@@ -1615,28 +1468,13 @@ function renderShimJs() {
     return Boolean(parent && child && (child === parent || child.startsWith(parent + "\\\\")));
   };
 
-  const getRuntimeWorkspacePathCandidates = () => {
-    const workspace = runtimeConfig?.workspace || {};
-    const workspaceFolder = runtimeConfig?.workspaceFolder || {};
-    const workspaceFolders = Array.isArray(runtimeConfig?.workspaceFolders)
-      ? runtimeConfig.workspaceFolders
-      : [];
-    return [
-      runtimeConfig?.cwd,
-      runtimeConfig?.workspacePath,
-      runtimeConfig?.workspaceFolder,
-      runtimeConfig?.currentWorkspacePath,
-      runtimeConfig?.currentWorkingDirectory,
-      runtimeConfig?.projectPath,
-      workspace?.path,
-      workspace?.cwd,
-      workspace?.workspacePath,
-      workspace?.workspaceFolder,
-      workspaceFolder?.path,
-      workspaceFolder?.fsPath,
-      workspaceFolders[0]?.path,
-      workspaceFolders[0]?.fsPath,
-    ].filter((value, index, values) => typeof value === "string" && value && values.indexOf(value) === index);
+  const workspaceFolderLookupCache = new Map();
+
+  const fetchWorkspaceFoldersForLookup = async (rootPath) => {
+    if (!workspaceFolderLookupCache.has(rootPath)) {
+      workspaceFolderLookupCache.set(rootPath, fetchWorkspaceFolders(rootPath));
+    }
+    return workspaceFolderLookupCache.get(rootPath);
   };
 
   const findWorkspaceFolderByPath = async (targetPath, roots) => {
@@ -1645,7 +1483,7 @@ function renderShimJs() {
       return null;
     }
 
-    const payload = await fetchWorkspaceFolders(rootEntry.path);
+    const payload = await fetchWorkspaceFoldersForLookup(rootEntry.path);
     const matchedFolder = (payload?.folders || [])
       .filter((entry) => isSameOrChildPath(entry.path, targetPath))
       .sort((left, right) => String(right.path || "").length - String(left.path || "").length)[0];
@@ -1657,32 +1495,56 @@ function renderShimJs() {
       : null;
   };
 
-  const resolveAutoSelectedWorkspace = async (detectedContext, roots) => {
-    for (const candidatePath of getRuntimeWorkspacePathCandidates()) {
-      const matchedByPath = await findWorkspaceFolderByPath(candidatePath, roots);
+  const findWorkspaceFolderByBridgeContext = async (roots) => {
+    let paths = [];
+    try {
+      paths = await withTimeout(
+        fetchWorkspaceContextCandidates(),
+        3000,
+        "Loading bridge workspace context timed out"
+      );
+    } catch (error) {
+      console.warn("[bridge] failed to resolve workspace from bridge context", error);
+      return null;
+    }
+
+    for (const entry of paths) {
+      const targetPath = typeof entry === "string" ? entry : entry?.path;
+      const matchedByPath = await findWorkspaceFolderByPath(targetPath, roots);
       if (matchedByPath) {
-        return {
-          rootPath: matchedByPath.rootPath,
-          preferredFolderPath: matchedByPath.folder.path,
-          matched: matchedByPath,
-        };
+        return matchedByPath;
       }
     }
 
-    const matchedByName = detectedContext?.workspaceName
-      ? await findWorkspaceFolderByName(detectedContext.workspaceName, roots)
+    return null;
+  };
+
+  const resolveAutoSelectedWorkspace = async (roots, preferredTargetPath = "") => {
+    const matchedByTargetPath = preferredTargetPath
+      ? await findWorkspaceFolderByPath(preferredTargetPath, roots)
       : null;
-    return matchedByName
-      ? {
-          rootPath: matchedByName.rootPath,
-          preferredFolderPath: matchedByName.folder.path,
-          matched: matchedByName,
-        }
-      : {
-          rootPath: "",
-          preferredFolderPath: "",
-          matched: null,
-        };
+    if (matchedByTargetPath) {
+      return {
+        rootPath: matchedByTargetPath.rootPath,
+        preferredFolderPath: matchedByTargetPath.folder.path,
+        matched: matchedByTargetPath,
+      };
+    }
+
+    const matchedByBridgeContext = await findWorkspaceFolderByBridgeContext(roots);
+    if (matchedByBridgeContext) {
+      return {
+        rootPath: matchedByBridgeContext.rootPath,
+        preferredFolderPath: matchedByBridgeContext.folder.path,
+        matched: matchedByBridgeContext,
+      };
+    }
+
+    return {
+      rootPath: getFallbackRootPath(roots),
+      preferredFolderPath: "",
+      matched: null,
+    };
   };
 
   const triggerWorkspaceDownload = (entry) => {
@@ -1828,9 +1690,7 @@ function renderShimJs() {
     }
 
     const roots = await fetchWorkspaceRoots();
-    const detectedContext = detectCurrentWorkspaceContext();
     const autoSelection = await resolveAutoSelectedWorkspace(
-      detectedContext,
       roots
     );
     const initialWorkspacePath = autoSelection.preferredFolderPath;
@@ -2308,7 +2168,7 @@ function renderShimJs() {
           selectedWorkspacePath =
             preferredFolderPath && folders.some((entry) => entry.path === preferredFolderPath)
               ? preferredFolderPath
-              : folders[0]?.path || "";
+              : "";
           workspaceHint.textContent = selectedWorkspacePath
             ? t("currentWorkspace", { path: selectedWorkspacePath })
             : t("noWorkspaceAvailable");
@@ -2534,6 +2394,18 @@ function renderShimJs() {
   };
 
   const openFolderRedirectDocuments = new WeakSet();
+  let pendingFileManagerOpen = null;
+
+  const openWorkspaceFileManagerOnce = (options = {}) => {
+    if (pendingFileManagerOpen) {
+      return pendingFileManagerOpen;
+    }
+
+    pendingFileManagerOpen = openWorkspaceFileManager(options).finally(() => {
+      pendingFileManagerOpen = null;
+    });
+    return pendingFileManagerOpen;
+  };
 
   const getEventControl = (event) => {
     const path = typeof event.composedPath === "function" ? event.composedPath() : [];
@@ -2549,6 +2421,22 @@ function renderShimJs() {
     return event.target?.nodeType === 1 && typeof event.target.closest === "function"
       ? event.target.closest("button, a, [role='button'], [role='menuitem']")
       : null;
+  };
+
+  const getOpenFolderTargetPath = (control) => {
+    if (!control || control.nodeType !== 1) {
+      return "";
+    }
+
+    const candidates = [
+      control.getAttribute("href"),
+      control.href,
+      control.getAttribute("data-path"),
+      control.getAttribute("data-file-path"),
+      control.getAttribute("data-target-path"),
+      control.getAttribute("data-uri"),
+    ];
+    return candidates.find((value) => normalizeLocalPathInput(value)) || "";
   };
 
   const isOpenFolderControl = (control) => {
@@ -2568,7 +2456,7 @@ function renderShimJs() {
       .filter(Boolean)
       .join(" ");
 
-    return /打开.*文件夹|打开.*目录|文件管理器中显示|资源管理器中显示|open.*folder|show.*folder|reveal.*explorer|reveal.*folder/iu.test(label);
+    return /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|文件管理器中显示|资源管理器中显示|open.*folder|show.*folder|reveal.*(explorer|folder)|folder.*open/iu.test(label);
   };
 
   const installOpenFolderRedirect = (targetDocument) => {
@@ -2583,10 +2471,15 @@ function renderShimJs() {
         return;
       }
 
+      const targetPath = getOpenFolderTargetPath(control);
+      if (!targetPath) {
+        return;
+      }
+
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-      openWorkspaceFileManager().catch((error) => {
+      openWorkspaceFileManagerOnce({ targetPath }).catch((error) => {
         console.error("[bridge] file manager failed", error);
         window.alert(error instanceof Error ? error.message : String(error));
       });
@@ -2801,7 +2694,7 @@ function renderShimJs() {
       button.id = "wb-bridge-file-manager-button";
       button.type = "button";
       button.addEventListener("click", () => {
-        openWorkspaceFileManager().catch((error) => {
+        openWorkspaceFileManagerOnce().catch((error) => {
           console.error("[bridge] file manager failed", error);
           window.alert(error instanceof Error ? error.message : String(error));
         });
@@ -2850,13 +2743,13 @@ function renderShimJs() {
     );
   };
 
-  const openWorkspaceFileManager = async () => {
+  const openWorkspaceFileManager = async (options = {}) => {
     if (document.getElementById("wb-bridge-file-manager-overlay")) {
       return;
     }
 
     const roots = await fetchWorkspaceRoots();
-    const detectedContext = detectCurrentWorkspaceContext();
+    const preferredTargetPath = normalizeLocalPathInput(options?.targetPath);
 
     return new Promise((resolve, reject) => {
       let selectedDrive = "";
@@ -3239,8 +3132,8 @@ function renderShimJs() {
         }
         workspaceSelect.appendChild(createWorkspaceOption);
 
-        if (!folders.some((entry) => entry.path === selectedWorkspacePath)) {
-          selectedWorkspacePath = folders[0]?.path || "";
+        if (selectedWorkspacePath && !folders.some((entry) => entry.path === selectedWorkspacePath)) {
+          selectedWorkspacePath = "";
         }
         workspaceSelect.value = selectedWorkspacePath;
       };
@@ -3277,7 +3170,7 @@ function renderShimJs() {
           selectedWorkspacePath =
             preferredFolderPath && folders.some((entry) => entry.path === preferredFolderPath)
               ? preferredFolderPath
-              : folders[0]?.path || "";
+              : "";
           workspaceHint.textContent = payload?.workspaceRoot
             ? t("currentRoot", { path: payload.workspaceRoot })
             : t("noWorkspaceAvailable");
@@ -3303,8 +3196,8 @@ function renderShimJs() {
 
       const tryAutoSelectWorkspace = async () => {
         const autoSelection = await resolveAutoSelectedWorkspace(
-          detectedContext,
-          roots
+          roots,
+          preferredTargetPath
         );
         selectedDrive = autoSelection.rootPath;
         driveSelect.value = autoSelection.rootPath;
@@ -3680,7 +3573,7 @@ function renderShimJs() {
       }
 
       if (message.type === "open-file-manager") {
-        openWorkspaceFileManager().catch((error) => {
+        openWorkspaceFileManagerOnce({ targetPath: message.targetPath || message.url }).catch((error) => {
           console.error("[bridge] file manager failed", error);
           window.alert(error instanceof Error ? error.message : String(error));
         });
@@ -3829,6 +3722,13 @@ function renderShimJs() {
             saveLastPickedComposerFolder(result?.[0] || "");
             return result;
           })
+        );
+      }
+
+      if (channel === "codebuddy:openFolder") {
+        const targetPath = args?.[0]?.folderPath || args?.[0];
+        return waitForActiveConnection().then(() =>
+          openWorkspaceFileManagerOnce({ targetPath }).then(() => true)
         );
       }
 

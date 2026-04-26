@@ -41,8 +41,11 @@ function getDriveRootPath(drive) {
   return `${drive}\\`;
 }
 
-function getDefaultWorkspaceRootPath() {
-  return path.win32.join(os.homedir(), WORKSPACE_ROOT_FOLDER_NAME);
+function getDefaultWorkspaceRootPaths() {
+  return [
+    path.win32.join(os.homedir(), WORKSPACE_ROOT_FOLDER_NAME),
+    path.win32.join(os.homedir(), "WorkBuddy"),
+  ];
 }
 
 function normalizeWindowsPath(inputPath) {
@@ -122,7 +125,7 @@ async function listAvailableWorkspaceRoots() {
     return CONFIGURED_WORKSPACE_ROOTS.map(buildWorkspaceRootEntry);
   }
 
-  return [buildWorkspaceRootEntry(getDefaultWorkspaceRootPath())];
+  return getDefaultWorkspaceRootPaths().map(buildWorkspaceRootEntry);
 }
 
 async function findWorkspaceRootByPath(targetPath) {
