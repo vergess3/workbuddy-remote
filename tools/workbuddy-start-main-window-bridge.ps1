@@ -12,6 +12,8 @@ param(
 
     [string]$PasswordHash,
 
+    [string]$EventLogPath,
+
     [switch]$Background,
 
     [switch]$HiddenChild,
@@ -86,6 +88,8 @@ function Start-HiddenBackgroundInstance {
 
         [string]$PasswordHash,
 
+        [string]$EventLogPath,
+
         [switch]$ShowReadyWindow,
 
         [switch]$OpenBrowser
@@ -103,6 +107,10 @@ function Start-HiddenBackgroundInstance {
 
     if ($PasswordHash) {
         $psArgs += @("-PasswordHash", "`"$PasswordHash`"")
+    }
+
+    if ($EventLogPath) {
+        $psArgs += @("-EventLogPath", "`"$EventLogPath`"")
     }
 
     if ($ShowReadyWindow) {
@@ -127,6 +135,7 @@ if ($Background -and -not $HiddenChild) {
         -UserDataDir $UserDataDir `
         -ListenHost $ListenHost `
         -PasswordHash $PasswordHash `
+        -EventLogPath $EventLogPath `
         -ShowReadyWindow:$ShouldShowReadyWindow `
         -OpenBrowser:$OpenBrowser
     exit 0
@@ -161,14 +170,57 @@ function Test-PortListening {
     return $null -ne $conn
 }
 
+function Write-BridgeLauncherLog {
+    param(
+        [string]$Path,
+        [string]$Level = "info",
+        [Parameter(Mandatory = $true)]
+        [string]$Event,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [hashtable]$Details = @{}
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        $entry = [ordered]@{
+            ts = (Get-Date).ToUniversalTime().ToString("o")
+            level = $Level
+            event = $Event
+            message = $Message
+            pid = $PID
+            details = $Details
+        }
+        $line = $entry | ConvertTo-Json -Compress -Depth 8
+        Add-Content -LiteralPath $Path -Value $line -Encoding UTF8
+    }
+    catch {
+    }
+}
+
 function Stop-PortProcess {
     param(
-        [int]$Port
+        [int]$Port,
+        [string]$LogPath
     )
 
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($conn) {
+        $processName = Get-ProcessNameSafe -ProcessId ([int]$conn.OwningProcess)
+        Write-BridgeLauncherLog -Path $LogPath -Event "process.port_owner.stopping" -Message "Stopping process that owns bridge port." -Details @{
+            port = $Port
+            targetPid = [int]$conn.OwningProcess
+            processName = $processName
+        }
         Stop-Process -Id $conn.OwningProcess -Force
+        Write-BridgeLauncherLog -Path $LogPath -Event "process.port_owner.stopped" -Message "Stopped process that owned bridge port." -Details @{
+            port = $Port
+            targetPid = [int]$conn.OwningProcess
+            processName = $processName
+        }
         Start-Sleep -Seconds 1
     }
 }
@@ -415,6 +467,12 @@ try {
     $bridgeScript = Join-Path $scriptDir "workbuddy-agentmanager-bridge.mjs"
     $bridgeLog = Join-Path $tmpDir "bridge-$BridgePort.log"
     $bridgeErr = Join-Path $tmpDir "bridge-$BridgePort.err.log"
+    $bridgeEvents = if ([string]::IsNullOrWhiteSpace($EventLogPath)) {
+        Join-Path $tmpDir "bridge-$BridgePort.events.log"
+    }
+    else {
+        $EventLogPath
+    }
     $primaryAccessHost = if ($normalizedListenHost -eq "0.0.0.0") { "127.0.0.1" } else { $ListenHost }
     $healthUrl = "http://$primaryAccessHost`:$BridgePort/readyz"
     $primaryUrl = "http://$primaryAccessHost`:$BridgePort/agent-manager/"
@@ -436,20 +494,57 @@ try {
         "powershell"
     }
 
+    Remove-Item $bridgeLog, $bridgeErr -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($EventLogPath)) {
+        Remove-Item $bridgeEvents -ErrorAction SilentlyContinue
+    }
+    Write-BridgeLauncherLog -Path $bridgeEvents -Event "launcher.start" -Message "WorkBuddy Remote launcher started." -Details @{
+        cdpPort = $CdpPort
+        bridgePort = $BridgePort
+        listenHost = $ListenHost
+        userDataDir = $UserDataDir
+        runtimeRoot = $runtimeRoot
+        tempDir = $tmpDir
+        launcherPid = $launcherPid
+        launcherParentPid = $launcherParentPid
+        relaunchShell = $relaunchShell
+    }
+
     Write-Host "Stopping bridge on port $BridgePort (if any)..."
-    Stop-PortProcess -Port $BridgePort
+    Stop-PortProcess -Port $BridgePort -LogPath $bridgeEvents
 
     if ($KillWorkBuddyProcessesBeforeStart) {
         Write-Host "Stopping existing WorkBuddy processes..."
-        Get-Process WorkBuddy -ErrorAction SilentlyContinue | Stop-Process -Force
+        $workBuddyProcesses = @(Get-Process WorkBuddy -ErrorAction SilentlyContinue)
+        foreach ($process in $workBuddyProcesses) {
+            Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.workbuddy.prelaunch_stopping" -Message "Stopping existing WorkBuddy process before launch." -Details @{
+                targetPid = $process.Id
+                processName = $process.ProcessName
+            }
+        }
+        $workBuddyProcesses | Stop-Process -Force
+        foreach ($process in $workBuddyProcesses) {
+            Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.workbuddy.prelaunch_stopped" -Message "Stopped existing WorkBuddy process before launch." -Details @{
+                targetPid = $process.Id
+                processName = $process.ProcessName
+            }
+        }
         Start-Sleep -Seconds 2
     }
     else {
         Write-Host "Skipping WorkBuddy process cleanup before launch."
+        Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.workbuddy.prelaunch_cleanup_skipped" -Message "Skipped WorkBuddy cleanup before launch." -Details @{
+            killWorkBuddyProcessesBeforeStart = $KillWorkBuddyProcessesBeforeStart
+        }
     }
 
     Write-Host "Launching WorkBuddy main window with CDP on port $CdpPort..."
     Write-Host "User data dir: $UserDataDir"
+    Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.workbuddy.starting" -Message "Starting WorkBuddy main window." -Details @{
+        exePath = $exePath
+        cdpPort = $CdpPort
+        userDataDir = $UserDataDir
+    }
     $previousBridgeBrowserFlag = $env:WORKBUDDY_BRIDGE_DISABLE_NATIVE_LOGIN_BROWSER
     $env:WORKBUDDY_BRIDGE_DISABLE_NATIVE_LOGIN_BROWSER = "1"
     $workBuddyProcess = $null
@@ -458,6 +553,12 @@ try {
             "--remote-debugging-port=$CdpPort",
             "--user-data-dir=$UserDataDir"
         ) -PassThru
+        Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.workbuddy.started" -Message "Started WorkBuddy main window." -Details @{
+            targetPid = $workBuddyProcess.Id
+            exePath = $exePath
+            cdpPort = $CdpPort
+            userDataDir = $UserDataDir
+        }
     }
     finally {
         if ($null -eq $previousBridgeBrowserFlag) {
@@ -480,8 +581,6 @@ try {
     if (-not $ready) {
         throw "CDP port $CdpPort did not start listening in time."
     }
-
-    Remove-Item $bridgeLog, $bridgeErr -ErrorAction SilentlyContinue
 
     Write-Host "Starting Agent Manager bridge on port $BridgePort..."
     Write-Host "Bridge listen host: $ListenHost"
@@ -510,7 +609,9 @@ try {
         "--launcher-parent-pid",
         $launcherParentPid,
         "--relaunch-shell",
-        $relaunchShell
+        $relaunchShell,
+        "--log-path",
+        $bridgeEvents
     )
     if ($PasswordHash) {
         $bridgeArgs += @("--password-hash", $PasswordHash)
@@ -524,10 +625,27 @@ try {
 
     $previousBridgeUiLang = $env:WORKBUDDY_REMOTE_UI_LANG
     $previousWorkBuddyExePath = $env:WORKBUDDY_EXE_PATH
+    $previousBridgeEventLogPath = $env:WORKBUDDY_REMOTE_EVENT_LOG_PATH
     $env:WORKBUDDY_REMOTE_UI_LANG = [System.Globalization.CultureInfo]::CurrentUICulture.Name
     $env:WORKBUDDY_EXE_PATH = $exePath
+    $env:WORKBUDDY_REMOTE_EVENT_LOG_PATH = $bridgeEvents
     try {
+        Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.bridge.starting" -Message "Starting Agent Manager bridge process." -Details @{
+            nodePath = $nodePath
+            bridgeScript = $bridgeScript
+            bridgePort = $BridgePort
+            cdpPort = $CdpPort
+            stdout = $bridgeLog
+            stderr = $bridgeErr
+        }
         $bridgeProcess = Start-Process -FilePath $nodePath -ArgumentList $bridgeArgs -WorkingDirectory $scriptDir -WindowStyle Hidden -RedirectStandardOutput $bridgeLog -RedirectStandardError $bridgeErr -PassThru
+        Write-BridgeLauncherLog -Path $bridgeEvents -Event "process.bridge.started" -Message "Started Agent Manager bridge process." -Details @{
+            targetPid = $bridgeProcess.Id
+            nodePath = $nodePath
+            bridgeScript = $bridgeScript
+            bridgePort = $BridgePort
+            cdpPort = $CdpPort
+        }
     }
     finally {
         if ($null -eq $previousBridgeUiLang) {
@@ -542,6 +660,13 @@ try {
         }
         else {
             $env:WORKBUDDY_EXE_PATH = $previousWorkBuddyExePath
+        }
+
+        if ($null -eq $previousBridgeEventLogPath) {
+            Remove-Item Env:WORKBUDDY_REMOTE_EVENT_LOG_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:WORKBUDDY_REMOTE_EVENT_LOG_PATH = $previousBridgeEventLogPath
         }
     }
 
@@ -588,12 +713,17 @@ try {
         }
     }
     else {
-        Show-ReadyWindow -PrimaryUrl $primaryUrl -Urls $urls -LogPath $bridgeLog -OpenPrimaryInBrowser:$OpenBrowser
+        Show-ReadyWindow -PrimaryUrl $primaryUrl -Urls $urls -LogPath $bridgeEvents -OpenPrimaryInBrowser:$OpenBrowser
     }
 }
 catch {
     $message = if ($_.Exception) { $_.Exception.Message } else { "$_" }
-    $logPathForDialog = if ($bridgeErr) { $bridgeErr } else { $null }
+    if ($bridgeEvents) {
+        Write-BridgeLauncherLog -Path $bridgeEvents -Level "error" -Event "launcher.error" -Message "WorkBuddy Remote launcher failed." -Details @{
+            error = $message
+        }
+    }
+    $logPathForDialog = if ($bridgeEvents) { $bridgeEvents } elseif ($bridgeErr) { $bridgeErr } else { $null }
     Show-ErrorDialog -Message $message -LogPath $logPathForDialog
     throw
 }

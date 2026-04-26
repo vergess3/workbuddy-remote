@@ -13,6 +13,7 @@ import {
   WebSocket,
   delay,
 } from "../shared.mjs";
+import { logger, summarizeMessage, summarizeValue } from "../logger.mjs";
 import { renderShimJs } from "../web/render.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -534,10 +535,10 @@ class BridgeRuntime {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
         return null;
       }
-      console.warn(
-        "[bridge] Failed to read cached Agent Manager target:",
-        error instanceof Error ? error.message : String(error)
-      );
+      logger.warn("cdp.target_cache.read_error", "Failed to read cached Agent Manager target", {
+        cachePath,
+        error,
+      });
       return null;
     }
   }
@@ -561,10 +562,10 @@ class BridgeRuntime {
       await fs.mkdir(path.dirname(cachePath), { recursive: true });
       await fs.writeFile(cachePath, JSON.stringify(payload, null, 2), "utf8");
     } catch (error) {
-      console.warn(
-        "[bridge] Failed to persist cached Agent Manager target:",
-        error instanceof Error ? error.message : String(error)
-      );
+      logger.warn("cdp.target_cache.write_error", "Failed to persist cached Agent Manager target", {
+        cachePath,
+        error,
+      });
     }
   }
 
@@ -580,10 +581,10 @@ class BridgeRuntime {
           fromCache: true,
         };
       } catch (error) {
-        console.warn(
-          "[bridge] Cached Agent Manager target is no longer usable:",
-          error instanceof Error ? error.message : String(error)
-        );
+        logger.warn("cdp.target_cache.stale", "Cached Agent Manager target is no longer usable", {
+          target: cachedTarget,
+          error,
+        });
       }
     }
 
@@ -638,7 +639,11 @@ class BridgeRuntime {
       await this.saveCachedTarget(target);
       if (forceRefresh || shouldReplaceClient || previousTargetUrl !== target.url) {
         const sourceLabel = fromCache ? "cached target" : "discovered target";
-        console.log("[bridge] Attached Agent Manager target:", target.url, `(${sourceLabel})`);
+        logger.info("cdp.target.attached", "Attached Agent Manager target", {
+          url: target.url,
+          source: sourceLabel,
+          webSocketDebuggerUrl: target.webSocketDebuggerUrl,
+        });
       }
     })();
 
@@ -684,7 +689,7 @@ class BridgeRuntime {
         throw error;
       }
 
-      console.warn("[bridge] Recovering from CDP error:", error.message);
+      logger.warn("cdp.recovering", "Recovering from CDP error", { error });
       await this.ensureCdpReady({ forceRefresh: true });
       return operation();
     }
@@ -739,10 +744,7 @@ class BridgeRuntime {
     try {
       return await this.refreshRuntimeConfig();
     } catch (error) {
-      console.warn(
-        "[bridge] Failed to refresh runtime config:",
-        error instanceof Error ? error.message : String(error)
-      );
+      logger.warn("runtime.config.refresh_error", "Failed to refresh runtime config", { error });
       return this.getCachedRuntimeConfig();
     }
   }
@@ -756,10 +758,7 @@ class BridgeRuntime {
     try {
       return await this.refreshAuthSession();
     } catch (error) {
-      console.warn(
-        "[bridge] Failed to refresh auth session:",
-        error instanceof Error ? error.message : String(error)
-      );
+      logger.warn("auth.session.refresh_error", "Failed to refresh auth session", { error });
       return this.getCachedAuthSession();
     }
   }
@@ -802,6 +801,10 @@ class BridgeRuntime {
   registerBrowserSocket(socket) {
     this.browserSockets.add(socket);
     this.browserSocketWindows.set(socket, new Set());
+    logger.info("runtime.browser_socket.registered", "Registered browser socket", {
+      browserSocketCount: this.browserSockets.size,
+      pendingManagedWindows: this.pendingManagedWindowIds.size,
+    });
     this.schedulePendingManagedWindowCleanup();
     socket.on("close", () => {
       this.browserSockets.delete(socket);
@@ -812,9 +815,17 @@ class BridgeRuntime {
         }
       }
       this.browserSocketWindows.delete(socket);
+      logger.info("runtime.browser_socket.closed", "Browser socket removed", {
+        trackedWindowIds: sessionWindows ? [...sessionWindows] : [],
+        pendingManagedWindows: this.pendingManagedWindowIds.size,
+        browserSocketCount: this.browserSockets.size,
+      });
       for (const [portId, client] of this.portClients.entries()) {
         if (client === socket) {
           this.portClients.delete(portId);
+          logger.debug("runtime.port_client.removed", "Removed port client for closed socket", {
+            portId,
+          });
         }
       }
     });
@@ -834,13 +845,16 @@ class BridgeRuntime {
       return;
     }
 
+    logger.info("runtime.managed_window_cleanup.scheduled", "Scheduled delayed managed window cleanup", {
+      delayMs: PREVIOUS_WINDOW_CLEANUP_DELAY_MS,
+      windowIds: [...this.pendingManagedWindowIds],
+    });
     this.pendingManagedWindowCleanupTimer = setTimeout(() => {
       this.pendingManagedWindowCleanupTimer = null;
       this.closePendingManagedWindows().catch((error) => {
-        console.warn(
-          "[bridge] Failed to cleanup previous managed windows:",
-          error instanceof Error ? error.message : String(error)
-        );
+        logger.warn("runtime.managed_window_cleanup.error", "Failed to cleanup previous managed windows", {
+          error,
+        });
       });
     }, PREVIOUS_WINDOW_CLEANUP_DELAY_MS);
   }
@@ -852,30 +866,44 @@ class BridgeRuntime {
 
     const windowIds = [...this.pendingManagedWindowIds];
     this.pendingManagedWindowIds.clear();
+    logger.info("runtime.managed_window_cleanup.started", "Closing previous managed windows", {
+      windowIds,
+    });
 
     for (const windowId of windowIds) {
       try {
         const result = await this.invokeIpc("codebuddy:closeManagedWindow", [{ windowId }]);
         if (result?.closed || result?.alreadyClosed) {
-          console.log("[bridge] Closed previous managed window:", windowId);
+          logger.info("runtime.managed_window_cleanup.closed", "Closed previous managed window", {
+            windowId,
+            result,
+          });
           continue;
         }
 
         if (result?.reason) {
-          console.log("[bridge] Skipped previous window cleanup:", windowId, result.reason);
+          logger.info("runtime.managed_window_cleanup.skipped", "Skipped previous managed window cleanup", {
+            windowId,
+            reason: result.reason,
+            result,
+          });
         }
       } catch (error) {
-        console.warn(
-          "[bridge] Failed to close previous managed window:",
+        logger.warn("runtime.managed_window_cleanup.close_error", "Failed to close previous managed window", {
           windowId,
-          error instanceof Error ? error.message : String(error)
-        );
+          error,
+        });
       }
     }
   }
 
   broadcast(message) {
     const payload = JSON.stringify(message);
+    logger.debug("websocket.bridge_to_browser.broadcast", "Broadcasting bridge message", {
+      browserSocketCount: this.browserSockets.size,
+      message: summarizeMessage(message),
+      bytes: Buffer.byteLength(payload),
+    });
     for (const socket of this.browserSockets) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(payload);
@@ -885,15 +913,38 @@ class BridgeRuntime {
 
   sendToSocket(socket, message) {
     if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message));
+      const payload = JSON.stringify(message);
+      logger.debug("websocket.bridge_to_browser", "Bridge sent browser message", {
+        message: summarizeMessage(message),
+        bytes: Buffer.byteLength(payload),
+      });
+      socket.send(payload);
     }
   }
 
   async invokeIpc(channel, args) {
+    logger.debug("ipc.invoke", "Invoking WorkBuddy IPC channel", {
+      channel,
+      args: summarizeValue(args),
+    });
     const expression = `globalThis.vscode.ipcRenderer.invoke(${JSON.stringify(channel)}, ...${JSON.stringify(
       args
     )})`;
-    return this.withCdpRecovery(() => this.cdp.evaluate(expression));
+    try {
+      const result = await this.withCdpRecovery(() => this.cdp.evaluate(expression));
+      logger.debug("ipc.invoke.result", "WorkBuddy IPC invoke completed", {
+        channel,
+        result: summarizeValue(result),
+      });
+      return result;
+    } catch (error) {
+      logger.error("ipc.invoke.error", "WorkBuddy IPC invoke failed", {
+        channel,
+        args: summarizeValue(args),
+        error,
+      });
+      throw error;
+    }
   }
 
   normalizeAuthLoginUrl(loginUrlResponse) {
@@ -947,7 +998,9 @@ class BridgeRuntime {
       throw new Error("Auth login URL was not returned by WorkBuddy");
     }
 
-    console.log("[bridge] Started native auth login and forwarded URL to browser:", url);
+    logger.info("auth.native_login.started", "Started native auth login and forwarded URL to browser", {
+      url,
+    });
     this.sendToSocket(socket, {
       type: "open-external",
       url,
@@ -991,6 +1044,9 @@ class BridgeRuntime {
       this.options.relaunchShell || "powershell",
     ];
 
+    if (this.options.logPath) {
+      psArgs.push("-LogPath", this.options.logPath);
+    }
     if (this.options.passwordHash) {
       psArgs.push("-PasswordHash", this.options.passwordHash);
     }
@@ -1010,6 +1066,16 @@ class BridgeRuntime {
       `Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList @(${quotedPsArgs})`,
     ];
 
+    logger.info("process.restart_helper.starting", "Starting restart helper", {
+      currentBridgePid: process.pid,
+      workbuddyPid: this.options.workbuddyPid,
+      launcherPid: this.options.launcherPid,
+      launcherParentPid: this.options.launcherParentPid,
+      cdpPort: this.options.cdpPort,
+      bridgePort: this.options.listenPort,
+      relaunchShell: this.options.relaunchShell,
+    });
+
     spawn("powershell.exe", bootstrapArgs, {
       stdio: "ignore",
       windowsHide: true,
@@ -1022,10 +1088,23 @@ class BridgeRuntime {
   }
 
   async sendIpc(channel, args) {
+    logger.debug("ipc.send", "Sending WorkBuddy IPC channel", {
+      channel,
+      args: summarizeValue(args),
+    });
     const expression = `(() => { globalThis.vscode.ipcRenderer.send(${JSON.stringify(
       channel
     )}, ...${JSON.stringify(args)}); return true; })()`;
-    return this.withCdpRecovery(() => this.cdp.evaluate(expression));
+    try {
+      return await this.withCdpRecovery(() => this.cdp.evaluate(expression));
+    } catch (error) {
+      logger.error("ipc.send.error", "WorkBuddy IPC send failed", {
+        channel,
+        args: summarizeValue(args),
+        error,
+      });
+      throw error;
+    }
   }
 
   async subscribeChannel(channel) {
@@ -1056,6 +1135,11 @@ class BridgeRuntime {
   async openDynamicPort(socket, windowId, nonce, portId) {
     this.trackSocketWindow(socket, windowId);
     this.portClients.set(portId, socket);
+    logger.info("dynamic_port.open", "Opening dynamic port", {
+      windowId,
+      portId,
+      noncePresent: Boolean(nonce),
+    });
     await this.withCdpRecovery(() =>
       this.cdp.evaluate(
         `globalThis.__workbuddyBridge.openDynamicPort(${JSON.stringify(
@@ -1069,6 +1153,11 @@ class BridgeRuntime {
     if (socket) {
       this.portClients.set(portId, socket);
     }
+
+    logger.debug("dynamic_port.browser_to_workbuddy", "Browser posted dynamic port message", {
+      portId,
+      payload: summarizeValue(payload),
+    });
 
     const openExternalRequest = this.extractOpenExternalRequest(payload);
     if (openExternalRequest) {
@@ -1087,6 +1176,7 @@ class BridgeRuntime {
 
   async closePort(portId) {
     this.portClients.delete(portId);
+    logger.info("dynamic_port.close", "Closing dynamic port", { portId });
     await this.withCdpRecovery(() =>
       this.cdp.evaluate(`globalThis.__workbuddyBridge.closePort(${JSON.stringify(portId)})`)
     );
@@ -1197,7 +1287,12 @@ class BridgeRuntime {
       return;
     }
 
-    console.log("[bridge] Forwarding openExternal to browser:", request.url);
+    logger.info("open_external.forward", "Forwarding openExternal request to browser", {
+      portId,
+      url: request.url,
+      rpcId: request.rpcId,
+      backendRequestId: request.backendRequestId,
+    });
     this.sendToSocket(socket, {
       type: "open-external",
       url: request.url,
@@ -1214,9 +1309,16 @@ class BridgeRuntime {
     try {
       payload = JSON.parse(params.payload);
     } catch (error) {
-      console.error("[bridge] Failed to parse binding payload:", error);
+      logger.error("cdp.binding_payload.parse_error", "Failed to parse binding payload", {
+        error,
+        raw: params?.payload,
+      });
       return;
     }
+
+    logger.debug("cdp.workbuddy_to_bridge", "WorkBuddy sent bridge notification", {
+      payload: summarizeMessage(payload),
+    });
 
     if (payload.type === "dynamic-port-ready") {
       const socket = this.portClients.get(payload.portId);

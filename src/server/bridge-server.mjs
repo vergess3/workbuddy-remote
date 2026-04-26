@@ -26,6 +26,7 @@ import {
   uploadWorkspaceFile,
 } from "../workspace/service.mjs";
 import { loadBridgeUiConfig } from "../config.mjs";
+import { logger, summarizeMessage } from "../logger.mjs";
 import { renderAgentManagerHtml } from "../web/render.mjs";
 
 const HTML_CACHE_CONTROL = "no-cache";
@@ -441,19 +442,39 @@ function attachWebSocketServer(server, runtime, auth) {
   const wss = new WebSocketServer({ noServer: true });
 
   wss.on("connection", (socket) => {
+    logger.info("websocket.connection", "Browser WebSocket connected", {
+      remoteAddress: socket?._socket?.remoteAddress,
+      remotePort: socket?._socket?.remotePort,
+    });
     runtime.registerBrowserSocket(socket);
+
+    socket.on("close", (code, reason) => {
+      logger.info("websocket.close", "Browser WebSocket closed", {
+        code,
+        reason: reason ? reason.toString() : "",
+      });
+    });
+
+    socket.on("error", (error) => {
+      logger.warn("websocket.error", "Browser WebSocket reported an error", { error });
+    });
 
     socket.on("message", async (raw) => {
       let message;
       try {
         message = JSON.parse(raw.toString());
       } catch {
+        logger.warn("websocket.browser_to_bridge.invalid_json", "Invalid browser WebSocket payload", {
+          bytes: raw?.byteLength ?? raw?.length,
+        });
         runtime.sendToSocket(socket, {
           ok: false,
           error: "Invalid JSON",
         });
         return;
       }
+
+      logger.debug("websocket.browser_to_bridge", "Browser sent bridge message", summarizeMessage(message));
 
       try {
         if (message.type === "invoke") {
@@ -509,6 +530,10 @@ function attachWebSocketServer(server, runtime, auth) {
           return;
         }
       } catch (error) {
+        logger.error("websocket.message.error", "Failed to handle browser bridge message", {
+          message: summarizeMessage(message),
+          error,
+        });
         const payload = {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -563,19 +588,26 @@ async function startBridgeServer(runtime, options) {
     server.listen(options.listenPort, options.listenHost, resolve);
   });
 
-  console.log("[bridge] CDP target:", `ws://${options.cdpHost}:${options.cdpPort}`);
+  logger.info("bridge.server.started", "Bridge HTTP/WebSocket server started", {
+    cdpTarget: `ws://${options.cdpHost}:${options.cdpPort}`,
+    listenHost: options.listenHost,
+    listenPort: options.listenPort,
+    workbuddyPid: options.workbuddyPid,
+    launcherPid: options.launcherPid,
+    logPath: options.logPath,
+  });
   if (auth.enabled) {
-    console.log("[bridge] Password protection:", "enabled");
+    logger.info("bridge.auth", "Password protection enabled");
   } else {
-    console.log("[bridge] Password protection:", "disabled");
+    logger.info("bridge.auth", "Password protection disabled");
   }
 
   const urls = getAccessUrls(options);
   if (urls.length > 0) {
-    console.log("[bridge] Browser URL:", urls[0]);
+    logger.info("bridge.url.primary", "Primary browser URL available", { url: urls[0] });
   }
   for (const url of urls.slice(1)) {
-    console.log("[bridge] Additional URL:", url);
+    logger.info("bridge.url.additional", "Additional browser URL available", { url });
   }
   return server;
 }

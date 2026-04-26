@@ -22,6 +22,8 @@ param(
 
     [string]$RelaunchShell = "powershell",
 
+    [string]$LogPath,
+
     [switch]$ShowReadyWindow,
 
     [switch]$OpenBrowser
@@ -31,6 +33,36 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $startupScript = Join-Path $scriptDir "workbuddy-start-main-window-bridge.ps1"
+
+function Write-BridgeRestartLog {
+    param(
+        [string]$Level = "info",
+        [Parameter(Mandatory = $true)]
+        [string]$Event,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [hashtable]$Details = @{}
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogPath)) {
+        return
+    }
+
+    try {
+        $entry = [ordered]@{
+            ts = (Get-Date).ToUniversalTime().ToString("o")
+            level = $Level
+            event = $Event
+            message = $Message
+            pid = $PID
+            details = $Details
+        }
+        $line = $entry | ConvertTo-Json -Compress -Depth 8
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    }
+    catch {
+    }
+}
 
 function Get-ProcessNameSafe {
     param(
@@ -65,11 +97,21 @@ function Stop-ProcessTreeMember {
     }
 
     if ($AllowedNames.Count -gt 0 -and -not ($AllowedNames | Where-Object { $_ -eq $processName.ToLowerInvariant() })) {
+        Write-BridgeRestartLog -Event "process.restart.stop_skipped" -Message "Skipped process stop because the process name is not allowed." -Details @{
+            targetPid = $ProcessId
+            processName = $processName
+            allowedNames = $AllowedNames
+        }
         return
     }
 
     try {
         $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        Write-BridgeRestartLog -Event "process.restart.stopping" -Message "Stopping process during restart." -Details @{
+            targetPid = $ProcessId
+            processName = $processName
+            hasMainWindow = [bool]$process.MainWindowHandle
+        }
         if ($process.MainWindowHandle -and $process.CloseMainWindow()) {
             Start-Sleep -Milliseconds 800
             $process.Refresh()
@@ -80,8 +122,17 @@ function Stop-ProcessTreeMember {
 
     try {
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+        Write-BridgeRestartLog -Event "process.restart.stopped" -Message "Stopped process during restart." -Details @{
+            targetPid = $ProcessId
+            processName = $processName
+        }
     }
     catch {
+        Write-BridgeRestartLog -Level "warn" -Event "process.restart.stop_error" -Message "Failed to stop process during restart." -Details @{
+            targetPid = $ProcessId
+            processName = $processName
+            error = $_.Exception.Message
+        }
     }
 }
 
@@ -127,6 +178,9 @@ function Build-StartupArgumentList {
     if ($ShowReadyWindow) {
         $args += "-ShowReadyWindow"
     }
+    if ($LogPath) {
+        $args += @("-EventLogPath", $LogPath)
+    }
     if ($OpenBrowser) {
         $args += "-OpenBrowser"
     }
@@ -152,6 +206,16 @@ function Quote-CmdArgument {
 
 Start-Sleep -Milliseconds 700
 
+Write-BridgeRestartLog -Event "restart_helper.start" -Message "Restart helper started." -Details @{
+    currentBridgePid = $CurrentBridgePid
+    workBuddyPid = $WorkBuddyPid
+    launcherPid = $LauncherPid
+    launcherParentPid = $LauncherParentPid
+    cdpPort = $CdpPort
+    bridgePort = $BridgePort
+    relaunchShell = $RelaunchShell
+}
+
 Stop-WorkBuddyInstance -ProcessId $WorkBuddyPid -Port $CdpPort
 Stop-ProcessTreeMember -ProcessId $CurrentBridgePid -AllowedNames @("node")
 Stop-ProcessTreeMember -ProcessId $LauncherPid -AllowedNames @("powershell", "pwsh")
@@ -166,15 +230,27 @@ $startupArgs = Build-StartupArgumentList
 
 switch ($RelaunchShell) {
     "hidden" {
+        Write-BridgeRestartLog -Event "restart_helper.relaunch" -Message "Relaunching bridge in hidden PowerShell." -Details @{
+            startupScript = $startupScript
+            shell = "hidden"
+        }
         Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList $startupArgs | Out-Null
         break
     }
     "cmd" {
         $command = ($startupArgs | ForEach-Object { Quote-CmdArgument -Value $_ }) -join " "
+        Write-BridgeRestartLog -Event "restart_helper.relaunch" -Message "Relaunching bridge in cmd." -Details @{
+            startupScript = $startupScript
+            shell = "cmd"
+        }
         Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "powershell $command") | Out-Null
         break
     }
     default {
+        Write-BridgeRestartLog -Event "restart_helper.relaunch" -Message "Relaunching bridge in PowerShell." -Details @{
+            startupScript = $startupScript
+            shell = "powershell"
+        }
         Start-Process -FilePath "powershell.exe" -ArgumentList $startupArgs | Out-Null
         break
     }

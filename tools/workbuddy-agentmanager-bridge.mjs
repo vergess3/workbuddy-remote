@@ -1,4 +1,5 @@
 import { BridgeRuntime } from "../src/bridge/runtime.mjs";
+import { logger } from "../src/logger.mjs";
 import { parseArgs } from "../src/shared.mjs";
 import { startBridgeServer } from "../src/server/bridge-server.mjs";
 
@@ -8,11 +9,11 @@ async function main() {
   await runtime.prepareWebAssets();
   await startBridgeServer(runtime, options);
   runtime.warmup().catch((error) => {
-    console.warn("[bridge] warmup failed:", error instanceof Error ? error.message : String(error));
+    logger.warn("bridge.warmup.error", "Bridge warmup failed", { error });
   });
 }
 
 main().catch((error) => {
-  console.error("[bridge] Fatal:", error instanceof Error ? error.stack || error.message : error);
+  logger.error("bridge.fatal", "Bridge process failed", { error });
   process.exitCode = 1;
 });

@@ -82,6 +82,7 @@ const DEFAULTS = {
   launcherPid: 0,
   launcherParentPid: 0,
   relaunchShell: "powershell",
+  logPath: "",
   showReadyWindow: false,
   openBrowser: false,
 };
@@ -137,6 +138,10 @@ function parseArgs(argv) {
         break;
       case "--relaunch-shell":
         config.relaunchShell = next || DEFAULTS.relaunchShell;
+        i += 1;
+        break;
+      case "--log-path":
+        config.logPath = next || "";
         i += 1;
         break;
       case "--show-ready-window":
