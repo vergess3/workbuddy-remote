@@ -737,14 +737,6 @@ function renderShimJs() {
     } catch {}
   };
 
-  const loadLastPickedComposerFolder = () => {
-    try {
-      return localStorage.getItem(lastComposerFolderStorageKey) || "";
-    } catch {
-      return "";
-    }
-  };
-
   const saveLastPickedComposerFolder = (folderPath) => {
     try {
       if (folderPath) {
@@ -1612,33 +1604,85 @@ function renderShimJs() {
     return null;
   };
 
-  const resolveAutoSelectedWorkspace = async (detectedContext, roots, fallbackRootPath = "") => {
-    const normalizedFallbackRootPath = roots.some((entry) => entry.path === fallbackRootPath)
-      ? fallbackRootPath
+  const normalizeComparablePath = (value) =>
+    typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value.trim())
+      ? value.trim().replace(/\\//g, "\\\\").replace(/[\\\\]+$/g, "").toLowerCase()
       : "";
 
-    if (!detectedContext?.workspaceName) {
-      return {
-        rootPath: normalizedFallbackRootPath,
-        preferredFolderPath: "",
-        matched: null,
-      };
+  const isSameOrChildPath = (parentPath, childPath) => {
+    const parent = normalizeComparablePath(parentPath);
+    const child = normalizeComparablePath(childPath);
+    return Boolean(parent && child && (child === parent || child.startsWith(parent + "\\\\")));
+  };
+
+  const getRuntimeWorkspacePathCandidates = () => {
+    const workspace = runtimeConfig?.workspace || {};
+    const workspaceFolder = runtimeConfig?.workspaceFolder || {};
+    const workspaceFolders = Array.isArray(runtimeConfig?.workspaceFolders)
+      ? runtimeConfig.workspaceFolders
+      : [];
+    return [
+      runtimeConfig?.cwd,
+      runtimeConfig?.workspacePath,
+      runtimeConfig?.workspaceFolder,
+      runtimeConfig?.currentWorkspacePath,
+      runtimeConfig?.currentWorkingDirectory,
+      runtimeConfig?.projectPath,
+      workspace?.path,
+      workspace?.cwd,
+      workspace?.workspacePath,
+      workspace?.workspaceFolder,
+      workspaceFolder?.path,
+      workspaceFolder?.fsPath,
+      workspaceFolders[0]?.path,
+      workspaceFolders[0]?.fsPath,
+    ].filter((value, index, values) => typeof value === "string" && value && values.indexOf(value) === index);
+  };
+
+  const findWorkspaceFolderByPath = async (targetPath, roots) => {
+    const rootEntry = (roots || []).find((entry) => isSameOrChildPath(entry.path, targetPath));
+    if (!rootEntry) {
+      return null;
     }
 
-    const matched = await findWorkspaceFolderByName(detectedContext.workspaceName, roots);
-    if (!matched) {
-      return {
-        rootPath: normalizedFallbackRootPath,
-        preferredFolderPath: "",
-        matched: null,
-      };
+    const payload = await fetchWorkspaceFolders(rootEntry.path);
+    const matchedFolder = (payload?.folders || [])
+      .filter((entry) => isSameOrChildPath(entry.path, targetPath))
+      .sort((left, right) => String(right.path || "").length - String(left.path || "").length)[0];
+    return matchedFolder
+      ? {
+          rootPath: rootEntry.path,
+          folder: matchedFolder,
+        }
+      : null;
+  };
+
+  const resolveAutoSelectedWorkspace = async (detectedContext, roots) => {
+    for (const candidatePath of getRuntimeWorkspacePathCandidates()) {
+      const matchedByPath = await findWorkspaceFolderByPath(candidatePath, roots);
+      if (matchedByPath) {
+        return {
+          rootPath: matchedByPath.rootPath,
+          preferredFolderPath: matchedByPath.folder.path,
+          matched: matchedByPath,
+        };
+      }
     }
 
-    return {
-      rootPath: matched.rootPath,
-      preferredFolderPath: matched.folder.path,
-      matched,
-    };
+    const matchedByName = detectedContext?.workspaceName
+      ? await findWorkspaceFolderByName(detectedContext.workspaceName, roots)
+      : null;
+    return matchedByName
+      ? {
+          rootPath: matchedByName.rootPath,
+          preferredFolderPath: matchedByName.folder.path,
+          matched: matchedByName,
+        }
+      : {
+          rootPath: "",
+          preferredFolderPath: "",
+          matched: null,
+        };
   };
 
   const triggerWorkspaceDownload = (entry) => {
@@ -1787,16 +1831,11 @@ function renderShimJs() {
     const detectedContext = detectCurrentWorkspaceContext();
     const autoSelection = await resolveAutoSelectedWorkspace(
       detectedContext,
-      roots,
-      loadLastPickedRoot()
+      roots
     );
-    const savedComposerFolder = loadLastPickedComposerFolder();
-    const initialWorkspacePath = autoSelection.preferredFolderPath || savedComposerFolder;
-    const initialDrive =
-      autoSelection.rootPath ||
-      deriveInitialRoot(initialWorkspacePath, roots) ||
-      loadLastPickedRoot();
-    if (!initialDrive && roots.length === 0) {
+    const initialWorkspacePath = autoSelection.preferredFolderPath;
+    const initialDrive = autoSelection.rootPath;
+    if (roots.length === 0) {
       window.alert(t("currentFolderUnavailable"));
       return;
     }
@@ -1804,7 +1843,7 @@ function renderShimJs() {
     return new Promise((resolve, reject) => {
       let selectedDrive = roots.some((entry) => entry.path === initialDrive)
         ? initialDrive
-        : roots[0]?.path || "";
+        : "";
       let selectedWorkspacePath = initialWorkspacePath;
       let folders = [];
       let files = [];
@@ -2494,6 +2533,79 @@ function renderShimJs() {
     }
   };
 
+  const openFolderRedirectDocuments = new WeakSet();
+
+  const getEventControl = (event) => {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    for (const item of path) {
+      if (!item || item.nodeType !== 1 || typeof item.matches !== "function") {
+        continue;
+      }
+      if (item.matches("button, a, [role='button'], [role='menuitem']")) {
+        return item;
+      }
+    }
+
+    return event.target?.nodeType === 1 && typeof event.target.closest === "function"
+      ? event.target.closest("button, a, [role='button'], [role='menuitem']")
+      : null;
+  };
+
+  const isOpenFolderControl = (control) => {
+    if (!control || control.nodeType !== 1 || control.closest?.("[id^='wb-bridge-']")) {
+      return false;
+    }
+
+    const label = [
+      control.textContent,
+      control.getAttribute("aria-label"),
+      control.getAttribute("title"),
+      control.getAttribute("data-testid"),
+      control.getAttribute("data-action"),
+      control.className,
+    ]
+      .map((value) => String(value || "").replace(/\\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" ");
+
+    return /打开.*文件夹|打开.*目录|文件管理器中显示|资源管理器中显示|open.*folder|show.*folder|reveal.*explorer|reveal.*folder/iu.test(label);
+  };
+
+  const installOpenFolderRedirect = (targetDocument) => {
+    if (!targetDocument || openFolderRedirectDocuments.has(targetDocument)) {
+      return;
+    }
+
+    openFolderRedirectDocuments.add(targetDocument);
+    const handler = (event) => {
+      const control = getEventControl(event);
+      if (!isOpenFolderControl(control)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      openWorkspaceFileManager().catch((error) => {
+        console.error("[bridge] file manager failed", error);
+        window.alert(error instanceof Error ? error.message : String(error));
+      });
+    };
+
+    for (const type of ["pointerdown", "mousedown", "click"]) {
+      targetDocument.addEventListener(type, handler, true);
+    }
+  };
+
+  const ensureOpenFolderRedirect = () => {
+    installOpenFolderRedirect(document);
+    for (const frame of document.querySelectorAll("iframe")) {
+      try {
+        installOpenFolderRedirect(frame.contentDocument);
+      } catch {}
+    }
+  };
+
   const applyFloatingActionButtonStyle = (
     button,
     rightPx,
@@ -2747,7 +2859,7 @@ function renderShimJs() {
     const detectedContext = detectCurrentWorkspaceContext();
 
     return new Promise((resolve, reject) => {
-      let selectedDrive = loadLastPickedRoot() || "";
+      let selectedDrive = "";
       let selectedWorkspacePath = "";
       let folders = [];
       let files = [];
@@ -3192,8 +3304,7 @@ function renderShimJs() {
       const tryAutoSelectWorkspace = async () => {
         const autoSelection = await resolveAutoSelectedWorkspace(
           detectedContext,
-          roots,
-          selectedDrive
+          roots
         );
         selectedDrive = autoSelection.rootPath;
         driveSelect.value = autoSelection.rootPath;
@@ -3206,7 +3317,7 @@ function renderShimJs() {
         await loadFoldersForDrive(autoSelection.rootPath, autoSelection.preferredFolderPath);
       };
 
-      driveSelect.value = roots.some((entry) => entry.path === selectedDrive) ? selectedDrive : "";
+      driveSelect.value = "";
 
       driveSelect.addEventListener("change", () => {
         loadFoldersForDrive(driveSelect.value).catch(fail);
@@ -3568,6 +3679,14 @@ function renderShimJs() {
         return;
       }
 
+      if (message.type === "open-file-manager") {
+        openWorkspaceFileManager().catch((error) => {
+          console.error("[bridge] file manager failed", error);
+          window.alert(error instanceof Error ? error.message : String(error));
+        });
+        return;
+      }
+
       if (message.type === "dynamic-port-ready") {
         const acquired = acquiredPorts.get(message.nonce);
         if (!acquired) {
@@ -3838,6 +3957,7 @@ function renderShimJs() {
       ensureRestartButton();
       maskSensitiveModelFields();
       enhanceComposerAttachmentButtons();
+      ensureOpenFolderRedirect();
     };
 
     if (document.body) {
