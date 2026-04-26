@@ -478,10 +478,18 @@ function attachWebSocketServer(server, runtime, auth) {
 
       try {
         if (message.type === "invoke") {
-          const result =
-            message.channel === AUTH_LOGIN_REQUEST
-              ? await runtime.invokeAuthLogin(socket, message.args || [])
-              : await runtime.invokeIpc(message.channel, message.args || []);
+          let result;
+          if (message.channel === AUTH_LOGIN_REQUEST) {
+            result = await runtime.invokeAuthLogin(socket, message.args || []);
+          } else if (message.channel === "codebuddy:cleanupWindows") {
+            result = await runtime.cleanupManagedWindows(socket, message.args || []);
+          } else if (message.channel === "codebuddy:closeManagedWindow") {
+            result = await runtime.closeManagedWindowSafely(socket, message.args || [], {
+              source: "browser-ipc-close-request",
+            });
+          } else {
+            result = await runtime.invokeIpc(message.channel, message.args || []);
+          }
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,

@@ -12,6 +12,7 @@ import {
   AUTH_SESSION_REQUEST,
   WebSocket,
   delay,
+  encodePayloadForTransport,
 } from "../shared.mjs";
 import { logger, summarizeMessage, summarizeValue } from "../logger.mjs";
 import { renderShimJs } from "../web/render.mjs";
@@ -28,6 +29,190 @@ const MAIN_CSS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.css");
 const CODEBUDDY_MAIN_JS_PATH = path.join(APP_ROOT, "out", "codebuddy", "main.js");
 const TARGET_CACHE_FILE_NAME = "workbuddy-remote-target-cache.json";
 const PREVIOUS_WINDOW_CLEANUP_DELAY_MS = 4_000;
+const RECONNECT_SETTLE_DELAY_MS = 12_000;
+const RECENT_IDLE_WINDOW_RECHECK_MS = 15_000;
+const PROTECTED_WINDOW_STATUS_CHECK_MS = 30_000;
+const TERMINAL_WINDOW_CLEANUP_DELAY_MS = 2_000;
+const UNKNOWN_WORK_PROTECTION_MS = 10 * 60 * 1000;
+const ACTIVE_SESSION_STALE_MS = 15 * 60 * 1000;
+const TRANSIENT_CONVERSATION_IDS = new Set(["__new__"]);
+const WORK_SIGNAL_KEYS = new Set([
+  "conversationId",
+  "threadId",
+  "chatId",
+  "cwd",
+  "workspacePath",
+  "workspaceFolder",
+  "prompt",
+]);
+const CONVERSATION_ID_KEYS = new Set(["conversationId", "threadId", "chatId"]);
+const ACTIVE_SESSION_STATUSES = new Set(["Working", "Planning", "Pending"]);
+const TERMINAL_SESSION_STATUSES = new Set([
+  "Completed",
+  "Failed",
+  "Terminated",
+  "Canceled",
+  "Cancelled",
+]);
+
+function hasMeaningfulValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  return typeof value === "object";
+}
+
+function unwrapTransportPayload(payload) {
+  if (!payload || payload.kind === "json") {
+    return payload?.value;
+  }
+
+  return null;
+}
+
+function createWorkSignalResult() {
+  return {
+    hasMarker: false,
+    hasUnknownWork: false,
+    conversationIds: new Set(),
+    activeConversationIds: new Set(),
+    terminalConversationIds: new Set(),
+  };
+}
+
+function normalizeId(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isTransientConversationId(value) {
+  const id = normalizeId(value);
+  return Boolean(id && TRANSIENT_CONVERSATION_IDS.has(id));
+}
+
+function getConversationIdCandidates(value) {
+  return [value?.conversationId, value?.threadId, value?.chatId].map(normalizeId).filter(Boolean);
+}
+
+function getRealConversationId(value) {
+  return getConversationIdCandidates(value).find((id) => !isTransientConversationId(id)) || null;
+}
+
+function readTimestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 && value < 10_000_000_000 ? value * 1000 : value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return readTimestampMs(numeric);
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+}
+
+function getSessionUpdatedAtMs(session) {
+  if (!session || typeof session !== "object") {
+    return 0;
+  }
+
+  return (
+    readTimestampMs(session.updatedAt) ||
+    readTimestampMs(session.lastUpdatedAt) ||
+    readTimestampMs(session.updated_at) ||
+    readTimestampMs(session.lastActivityAt)
+  );
+}
+
+function removeTransientConversationIds(state) {
+  if (!state?.conversationIds) {
+    return [];
+  }
+
+  const removed = [];
+  for (const conversationId of [...state.conversationIds]) {
+    if (isTransientConversationId(conversationId)) {
+      state.conversationIds.delete(conversationId);
+      state.activeConversationIds?.delete(conversationId);
+      state.terminalConversationIds?.delete(conversationId);
+      state.staleConversationIds?.delete(conversationId);
+      removed.push(conversationId);
+    }
+  }
+  return removed;
+}
+
+function collectSignalsFromObject(value, result) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return;
+  }
+
+  const conversationId = getRealConversationId(value);
+  const hasTransientConversationId = getConversationIdCandidates(value).some(isTransientConversationId);
+  const status = typeof value.status === "string" ? value.status : "";
+  const terminalConversation = conversationId && TERMINAL_SESSION_STATUSES.has(status);
+
+  if (conversationId) {
+    result.hasMarker = true;
+    result.conversationIds.add(conversationId);
+    if (ACTIVE_SESSION_STATUSES.has(status)) {
+      result.activeConversationIds.add(conversationId);
+    } else if (TERMINAL_SESSION_STATUSES.has(status)) {
+      result.terminalConversationIds.add(conversationId);
+    }
+  }
+
+  if (hasTransientConversationId && !conversationId) {
+    result.hasMarker = true;
+    result.hasUnknownWork = true;
+  }
+
+  for (const key of WORK_SIGNAL_KEYS) {
+    if (key in value && hasMeaningfulValue(value[key])) {
+      result.hasMarker = true;
+      if (!CONVERSATION_ID_KEYS.has(key) && !terminalConversation) {
+        result.hasUnknownWork = true;
+      }
+    }
+  }
+}
+
+function collectWorkSignals(value) {
+  const result = createWorkSignalResult();
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return result;
+  }
+
+  collectSignalsFromObject(value, result);
+  collectSignalsFromObject(value.params, result);
+  collectSignalsFromObject(value.payload, result);
+  collectSignalsFromObject(value.payload?.params, result);
+  collectSignalsFromObject(value.session, result);
+
+  return result;
+}
 
 function createHashVersion(parts) {
   const hash = crypto.createHash("sha256");
@@ -419,8 +604,15 @@ class BridgeRuntime {
     this.patchedAgentManagerJs = null;
     this.browserSockets = new Set();
     this.browserSocketWindows = new Map();
-    this.pendingManagedWindowIds = new Set();
+    this.browserSocketIds = new Map();
+    this.browserSocketSeq = 0;
+    this.lastBrowserSocketRegisteredAt = 0;
+    this.lastDynamicPortOpenedAt = 0;
+    this.pendingManagedWindowIds = new Map();
     this.pendingManagedWindowCleanupTimer = null;
+    this.windowStates = new Map();
+    this.portStates = new Map();
+    this.protectedWindowCheckTimers = new Map();
     this.channelRefCounts = new Map();
     this.portClients = new Map();
     this.reconnectPromise = null;
@@ -785,23 +977,398 @@ class BridgeRuntime {
       '},[n,a,t,s]),_=(0,L.useCallback)(async(B,w=Date.now())=>{if(t?.environmentType==="cloud"||typeof B!="string"||!B)return!1;await C(B,w);return!0},[t,C]),E=(typeof globalThis!="undefined"&&(globalThis.__WB_REMOTE_ATTACH_LOCAL_FILE__=_),(0,L.useCallback)(async()=>{if(!t?.pickFile||!n)return;let B=t.environmentType==="cloud",';
     const closeLocalAttachHookFrom = '},[t,n,m,C,i,d,g]),b=(0,L.useMemo)';
     const closeLocalAttachHookTo = '},[t,n,m,C,i,d,g])),b=(0,L.useMemo)';
+    const eagerWarmupFrom =
+      'this._connectionOrchestrator.startAutoConnection(),this._setupConnectionEvents(),this._windowFactoryService.warmupSessionWindow().catch(i=>{this._logger.warn("Background warm-up failed:",i)}),this._sessionSyncService.onAuthSessionChanged';
+    const eagerWarmupTo =
+      'this._connectionOrchestrator.startAutoConnection(),this._setupConnectionEvents(),this._sessionSyncService.onAuthSessionChanged';
+    const deferWarmupFrom =
+      'this._logger.info(`Connected to ${n} existing windows`),this._isStarted=!0;';
+    const deferWarmupTo =
+      'this._logger.info(`Connected to ${n} existing windows`),this._isStarted=!0;';
+    const disableWarmPoolFrom = "var xrc=2,krc=class";
+    const disableWarmPoolTo = "var xrc=0,krc=class";
 
     if (
       !source.includes(exposeLocalAttachHookFrom) ||
-      !source.includes(closeLocalAttachHookFrom)
+      !source.includes(closeLocalAttachHookFrom) ||
+      !source.includes(eagerWarmupFrom) ||
+      !source.includes(deferWarmupFrom) ||
+      !source.includes(disableWarmPoolFrom)
     ) {
-      throw new Error("Unable to patch codebuddy/main.js: attachment hook anchor not found");
+      throw new Error("Unable to patch codebuddy/main.js: expected patch anchor not found");
     }
 
     return source
       .replace(exposeLocalAttachHookFrom, exposeLocalAttachHookTo)
-      .replace(closeLocalAttachHookFrom, closeLocalAttachHookTo);
+      .replace(closeLocalAttachHookFrom, closeLocalAttachHookTo)
+      .replace(eagerWarmupFrom, eagerWarmupTo)
+      .replace(deferWarmupFrom, deferWarmupTo)
+      .replace(disableWarmPoolFrom, disableWarmPoolTo);
+  }
+
+  getBrowserSocketId(socket) {
+    if (!socket) {
+      return null;
+    }
+
+    let socketId = this.browserSocketIds.get(socket);
+    if (!socketId) {
+      socketId = ++this.browserSocketSeq;
+      this.browserSocketIds.set(socket, socketId);
+    }
+
+    return socketId;
+  }
+
+  getWindowState(windowId) {
+    if (!Number.isInteger(windowId) || windowId <= 0) {
+      return null;
+    }
+
+    let state = this.windowStates.get(windowId);
+    if (!state) {
+      state = {
+        windowId,
+        generation: 0,
+        activeSocketIds: new Set(),
+        portIds: new Set(),
+        conversationIds: new Set(),
+        activeConversationIds: new Set(),
+        terminalConversationIds: new Set(),
+        staleConversationIds: new Set(),
+        hasWork: false,
+        lastActivityAt: 0,
+        lastWorkAt: 0,
+        lastUnknownWorkAt: 0,
+        lastAttachedAt: 0,
+        lastDetachedAt: 0,
+      };
+      this.windowStates.set(windowId, state);
+    }
+
+    return state;
+  }
+
+  summarizeWindowState(state) {
+    if (!state) {
+      return null;
+    }
+
+    return {
+      windowId: state.windowId,
+      generation: state.generation,
+      activeSocketIds: [...state.activeSocketIds],
+      portIds: [...state.portIds],
+      conversationIds: [...state.conversationIds],
+      activeConversationIds: [...state.activeConversationIds],
+      terminalConversationIds: [...state.terminalConversationIds],
+      staleConversationIds: [...(state.staleConversationIds || [])],
+      hasWork: state.hasWork,
+      lastActivityAt: state.lastActivityAt,
+      lastWorkAt: state.lastWorkAt,
+      lastUnknownWorkAt: state.lastUnknownWorkAt,
+      lastAttachedAt: state.lastAttachedAt,
+      lastDetachedAt: state.lastDetachedAt,
+    };
+  }
+
+  isWindowStateTerminal(state) {
+    if (!state || state.conversationIds.size === 0 || state.activeConversationIds.size > 0) {
+      return false;
+    }
+
+    for (const conversationId of state.conversationIds) {
+      if (!state.terminalConversationIds.has(conversationId)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  forgetWindowState(windowId) {
+    const timer = this.protectedWindowCheckTimers.get(windowId);
+    if (timer) {
+      clearTimeout(timer);
+      this.protectedWindowCheckTimers.delete(windowId);
+    }
+
+    this.pendingManagedWindowIds.delete(windowId);
+    for (const [portId, portState] of this.portStates.entries()) {
+      if (portState.windowId === windowId) {
+        this.portStates.delete(portId);
+        this.portClients.delete(portId);
+      }
+    }
+
+    this.windowStates.delete(windowId);
+  }
+
+  scheduleProtectedWindowStatusCheck(windowId, delayMs = PROTECTED_WINDOW_STATUS_CHECK_MS) {
+    if (!Number.isInteger(windowId) || windowId <= 0 || this.protectedWindowCheckTimers.has(windowId)) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.protectedWindowCheckTimers.delete(windowId);
+      this.checkProtectedWindowStatus(windowId).catch((error) => {
+        logger.warn(
+          "runtime.managed_window.protected_status_check_error",
+          "Failed to check protected managed window status",
+          {
+            windowId,
+            error,
+          }
+        );
+        this.scheduleProtectedWindowStatusCheck(windowId, PROTECTED_WINDOW_STATUS_CHECK_MS);
+      });
+    }, delayMs);
+
+    this.protectedWindowCheckTimers.set(windowId, timer);
+  }
+
+  async checkProtectedWindowStatus(windowId) {
+    const state = this.windowStates.get(windowId);
+    if (!state) {
+      return;
+    }
+
+    const protection = await this.getWindowWorkProtection(state);
+    if (protection.protected) {
+      this.scheduleProtectedWindowStatusCheck(windowId, PROTECTED_WINDOW_STATUS_CHECK_MS);
+      return;
+    }
+
+    logger.info(
+      "runtime.managed_window.work_completed",
+      "Managed window work is no longer active; scheduling cleanup",
+      {
+        windowId,
+        state: this.summarizeWindowState(state),
+      }
+    );
+    this.queueManagedWindowCleanup(windowId, { source: "work-completed-status-check" });
+    this.schedulePendingManagedWindowCleanup(TERMINAL_WINDOW_CLEANUP_DELAY_MS);
+  }
+
+  recordWindowAttachment(socket, windowId, { portId = null, reason = "attach" } = {}) {
+    const socketId = this.getBrowserSocketId(socket);
+    const state = this.getWindowState(windowId);
+    if (!socketId || !state) {
+      return null;
+    }
+
+    const now = Date.now();
+    this.lastDynamicPortOpenedAt = now;
+    const wasActiveOnSocket = state.activeSocketIds.has(socketId);
+    if (!wasActiveOnSocket) {
+      state.generation += 1;
+    }
+    state.activeSocketIds.add(socketId);
+    state.lastAttachedAt = now;
+    state.lastActivityAt = now;
+
+    if (portId) {
+      state.portIds.add(portId);
+      this.portStates.set(portId, {
+        portId,
+        windowId,
+        socketId,
+        openedAt: now,
+        lastActivityAt: now,
+      });
+    }
+
+    const pending = this.pendingManagedWindowIds.get(windowId);
+    if (pending) {
+      logger.info(
+        "runtime.managed_window_cleanup.rebound_pending_retained",
+        "Managed window reattached while cleanup was pending; keeping cleanup candidate for a settled status check",
+        {
+          windowId,
+          portId,
+          socketId,
+          reason,
+          pending,
+          state: this.summarizeWindowState(state),
+        }
+      );
+    }
+
+    return state;
+  }
+
+  applyWorkSignalsToWindow(state, signals, { portId = null, source = "port-message" } = {}) {
+    if (!state || !signals?.hasMarker) {
+      return;
+    }
+
+    const now = Date.now();
+    const wasProtected = state.hasWork;
+
+    for (const conversationId of signals.conversationIds) {
+      state.conversationIds.add(conversationId);
+    }
+    for (const conversationId of signals.activeConversationIds) {
+      state.activeConversationIds.add(conversationId);
+      state.terminalConversationIds.delete(conversationId);
+      state.staleConversationIds?.delete(conversationId);
+    }
+    for (const conversationId of signals.terminalConversationIds) {
+      state.terminalConversationIds.add(conversationId);
+      state.activeConversationIds.delete(conversationId);
+      state.staleConversationIds?.delete(conversationId);
+    }
+
+    if (
+      signals.hasUnknownWork ||
+      signals.activeConversationIds.size > 0 ||
+      signals.conversationIds.size > signals.terminalConversationIds.size
+    ) {
+      state.hasWork = true;
+      state.lastWorkAt = now;
+    }
+
+    if (signals.hasUnknownWork) {
+      state.lastUnknownWorkAt = now;
+    }
+    state.lastActivityAt = now;
+
+    const terminal = this.isWindowStateTerminal(state);
+    if (terminal) {
+      state.hasWork = false;
+      state.lastUnknownWorkAt = 0;
+      logger.info(
+        "runtime.managed_window.terminal_signal",
+        "Managed window received terminal session signal; scheduling cleanup",
+        {
+          windowId: state.windowId,
+          portId,
+          source,
+          state: this.summarizeWindowState(state),
+        }
+      );
+      this.queueManagedWindowCleanup(state.windowId, { source: "terminal-session-signal" });
+      this.schedulePendingManagedWindowCleanup(TERMINAL_WINDOW_CLEANUP_DELAY_MS);
+    } else if (state.hasWork) {
+      this.scheduleProtectedWindowStatusCheck(state.windowId);
+    }
+
+    const pending = this.pendingManagedWindowIds.get(state.windowId);
+    if (!wasProtected || pending) {
+      logger.info(
+        "runtime.managed_window.protected",
+        terminal
+          ? "Marked managed window as terminal and ready for cleanup"
+          : "Marked managed window as work-bearing and protected it from cleanup",
+        {
+          windowId: state.windowId,
+          portId,
+          source,
+          pendingCleanupRetained: Boolean(pending),
+          conversationIds: [...signals.conversationIds],
+          activeConversationIds: [...signals.activeConversationIds],
+          terminalConversationIds: [...signals.terminalConversationIds],
+          hasUnknownWork: signals.hasUnknownWork,
+          state: this.summarizeWindowState(state),
+        }
+      );
+    }
+  }
+
+  markPortActivity(portId, payload, source) {
+    const portState = this.portStates.get(portId);
+    if (!portState) {
+      return;
+    }
+
+    const now = Date.now();
+    portState.lastActivityAt = now;
+
+    const state = this.getWindowState(portState.windowId);
+    if (!state) {
+      return;
+    }
+
+    state.lastActivityAt = now;
+    const signals = collectWorkSignals(unwrapTransportPayload(payload));
+    this.applyWorkSignalsToWindow(state, signals, { portId, source });
+  }
+
+  applySessionSignalsToTrackedWindows(value, source) {
+    const signals = collectWorkSignals(value);
+    if (!signals.hasMarker || signals.conversationIds.size === 0) {
+      return;
+    }
+
+    for (const state of this.windowStates.values()) {
+      const matched = [...signals.conversationIds].some((conversationId) =>
+        state.conversationIds.has(conversationId)
+      );
+      if (matched) {
+        this.applyWorkSignalsToWindow(state, signals, { source });
+      }
+    }
+  }
+
+  queueManagedWindowCleanup(windowId, { socketId = null, source = "socket-close" } = {}) {
+    const state = this.getWindowState(windowId);
+    if (!state) {
+      return;
+    }
+
+    const entry = {
+      windowId,
+      generation: state.generation,
+      socketId,
+      source,
+      queuedAt: Date.now(),
+      hadWorkAtQueue: state.hasWork,
+      lastWorkAt: state.lastWorkAt,
+      lastUnknownWorkAt: state.lastUnknownWorkAt,
+    };
+
+    this.pendingManagedWindowIds.set(windowId, entry);
+  }
+
+  detachSocketPorts(socket, socketId) {
+    for (const [portId, client] of this.portClients.entries()) {
+      if (client === socket) {
+        this.portClients.delete(portId);
+        logger.debug("runtime.port_client.removed", "Removed port client for closed socket", {
+          portId,
+          socketId,
+        });
+      }
+    }
+
+    for (const [portId, portState] of this.portStates.entries()) {
+      if (portState.socketId === socketId) {
+        const windowState = this.windowStates.get(portState.windowId);
+        windowState?.portIds.delete(portId);
+        this.portStates.delete(portId);
+      }
+    }
+  }
+
+  detachSocketWindow(socketId, windowId) {
+    const state = this.getWindowState(windowId);
+    if (!state) {
+      return;
+    }
+
+    state.activeSocketIds.delete(socketId);
+    state.lastDetachedAt = Date.now();
+    this.queueManagedWindowCleanup(windowId, { socketId, source: "socket-close" });
   }
 
   registerBrowserSocket(socket) {
+    const socketId = this.getBrowserSocketId(socket);
+    this.lastBrowserSocketRegisteredAt = Date.now();
     this.browserSockets.add(socket);
     this.browserSocketWindows.set(socket, new Set());
     logger.info("runtime.browser_socket.registered", "Registered browser socket", {
+      socketId,
       browserSocketCount: this.browserSockets.size,
       pendingManagedWindows: this.pendingManagedWindowIds.size,
     });
@@ -811,43 +1378,40 @@ class BridgeRuntime {
       const sessionWindows = this.browserSocketWindows.get(socket);
       if (sessionWindows) {
         for (const windowId of sessionWindows) {
-          this.pendingManagedWindowIds.add(windowId);
+          this.detachSocketWindow(socketId, windowId);
         }
       }
       this.browserSocketWindows.delete(socket);
+      this.detachSocketPorts(socket, socketId);
+      this.browserSocketIds.delete(socket);
       logger.info("runtime.browser_socket.closed", "Browser socket removed", {
+        socketId,
         trackedWindowIds: sessionWindows ? [...sessionWindows] : [],
         pendingManagedWindows: this.pendingManagedWindowIds.size,
         browserSocketCount: this.browserSockets.size,
       });
-      for (const [portId, client] of this.portClients.entries()) {
-        if (client === socket) {
-          this.portClients.delete(portId);
-          logger.debug("runtime.port_client.removed", "Removed port client for closed socket", {
-            portId,
-          });
-        }
-      }
+      this.schedulePendingManagedWindowCleanup();
     });
   }
 
-  trackSocketWindow(socket, windowId) {
+  trackSocketWindow(socket, windowId, options = {}) {
     const windows = this.browserSocketWindows.get(socket);
     if (!windows || !Number.isInteger(windowId) || windowId <= 0) {
-      return;
+      return null;
     }
 
     windows.add(windowId);
+    return this.recordWindowAttachment(socket, windowId, options);
   }
 
-  schedulePendingManagedWindowCleanup() {
+  schedulePendingManagedWindowCleanup(delayMs = PREVIOUS_WINDOW_CLEANUP_DELAY_MS) {
     if (this.pendingManagedWindowIds.size === 0 || this.pendingManagedWindowCleanupTimer) {
       return;
     }
 
     logger.info("runtime.managed_window_cleanup.scheduled", "Scheduled delayed managed window cleanup", {
-      delayMs: PREVIOUS_WINDOW_CLEANUP_DELAY_MS,
-      windowIds: [...this.pendingManagedWindowIds],
+      delayMs,
+      windowIds: [...this.pendingManagedWindowIds.keys()],
     });
     this.pendingManagedWindowCleanupTimer = setTimeout(() => {
       this.pendingManagedWindowCleanupTimer = null;
@@ -856,7 +1420,439 @@ class BridgeRuntime {
           error,
         });
       });
-    }, PREVIOUS_WINDOW_CLEANUP_DELAY_MS);
+    }, delayMs);
+  }
+
+  isWindowLiveTracked(windowId) {
+    const state = this.windowStates.get(windowId);
+    if (state?.activeSocketIds.size > 0) {
+      return true;
+    }
+
+    for (const windows of this.browserSocketWindows.values()) {
+      if (windows.has(windowId)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  getBrowserReconnectRequeueMs() {
+    if (this.browserSockets.size === 0 || !this.lastBrowserSocketRegisteredAt) {
+      return 0;
+    }
+
+    const ageMs = Date.now() - this.lastBrowserSocketRegisteredAt;
+    return ageMs < RECONNECT_SETTLE_DELAY_MS ? RECONNECT_SETTLE_DELAY_MS - ageMs : 0;
+  }
+
+  async getWindowWorkProtection(state) {
+    if (!state) {
+      return { protected: false };
+    }
+
+    const now = Date.now();
+    const removedTransientConversationIds = removeTransientConversationIds(state);
+    if (removedTransientConversationIds.length > 0) {
+      logger.info(
+        "runtime.managed_window_cleanup.transient_conversation_pruned",
+        "Ignored transient managed-window conversation id before cleanup decision",
+        {
+          windowId: state.windowId,
+          removedConversationIds: removedTransientConversationIds,
+          state: this.summarizeWindowState(state),
+        }
+      );
+    }
+
+    let checkedConversationCount = 0;
+    if (state.conversationIds.size > 0) {
+      for (const conversationId of state.conversationIds) {
+        try {
+          const session = await this.invokeIpc("codebuddy:getSession", [conversationId]);
+          const status = typeof session?.status === "string" ? session.status : "";
+          checkedConversationCount += 1;
+          if (ACTIVE_SESSION_STATUSES.has(status)) {
+            const updatedAtMs = getSessionUpdatedAtMs(session);
+            const fallbackActivityMs = state.lastWorkAt || state.lastActivityAt || 0;
+            const activityAtMs = updatedAtMs || fallbackActivityMs;
+            const activityAgeMs = activityAtMs ? now - activityAtMs : Number.POSITIVE_INFINITY;
+
+            if (activityAgeMs > ACTIVE_SESSION_STALE_MS) {
+              const wasAlreadyStale = state.staleConversationIds?.has(conversationId);
+              state.activeConversationIds.delete(conversationId);
+              state.staleConversationIds?.add(conversationId);
+              if (!wasAlreadyStale) {
+                logger.warn(
+                  "runtime.managed_window_cleanup.stale_active_session",
+                  "Treating stale active session as unprotected for managed-window cleanup",
+                  {
+                    windowId: state.windowId,
+                    conversationId,
+                    status,
+                    updatedAt: session?.updatedAt,
+                    activityAgeMs,
+                    staleAfterMs: ACTIVE_SESSION_STALE_MS,
+                  }
+                );
+              }
+              continue;
+            }
+
+            state.hasWork = true;
+            state.activeConversationIds.add(conversationId);
+            state.terminalConversationIds.delete(conversationId);
+            state.staleConversationIds?.delete(conversationId);
+            return {
+              protected: true,
+              reason: "conversation-still-working",
+              conversationId,
+              status,
+              activityAgeMs,
+              updatedAt: session?.updatedAt,
+            };
+          }
+
+          if (TERMINAL_SESSION_STATUSES.has(status)) {
+            state.activeConversationIds.delete(conversationId);
+            state.terminalConversationIds.add(conversationId);
+            state.staleConversationIds?.delete(conversationId);
+            continue;
+          }
+
+          if (!session && state.lastWorkAt && now - state.lastWorkAt < UNKNOWN_WORK_PROTECTION_MS) {
+            return {
+              protected: true,
+              reason: "conversation-status-unavailable-recent-work",
+              conversationId,
+            };
+          }
+
+          if (session && !TERMINAL_SESSION_STATUSES.has(status)) {
+            const updatedAtMs = getSessionUpdatedAtMs(session);
+            const fallbackActivityMs = state.lastWorkAt || state.lastActivityAt || 0;
+            const activityAtMs = updatedAtMs || fallbackActivityMs;
+            const activityAgeMs = activityAtMs ? now - activityAtMs : Number.POSITIVE_INFINITY;
+
+            if (activityAgeMs > ACTIVE_SESSION_STALE_MS) {
+              const wasAlreadyStale = state.staleConversationIds?.has(conversationId);
+              state.activeConversationIds.delete(conversationId);
+              state.staleConversationIds?.add(conversationId);
+              if (!wasAlreadyStale) {
+                logger.warn(
+                  "runtime.managed_window_cleanup.stale_nonterminal_session",
+                  "Treating stale nonterminal session as unprotected for managed-window cleanup",
+                  {
+                    windowId: state.windowId,
+                    conversationId,
+                    status: status || "unknown",
+                    updatedAt: session?.updatedAt,
+                    activityAgeMs,
+                    staleAfterMs: ACTIVE_SESSION_STALE_MS,
+                  }
+                );
+              }
+              continue;
+            }
+
+            return {
+              protected: true,
+              reason: "conversation-status-nonterminal",
+              conversationId,
+              status: status || "unknown",
+              activityAgeMs,
+              updatedAt: session?.updatedAt,
+            };
+          }
+        } catch (error) {
+          logger.warn(
+            "runtime.managed_window_cleanup.session_status_error",
+            "Failed to read session status before managed window cleanup",
+            {
+              windowId: state.windowId,
+              conversationId,
+              error,
+            }
+          );
+          return {
+            protected: true,
+            reason: "conversation-status-check-failed",
+            conversationId,
+          };
+        }
+      }
+    }
+
+    if (checkedConversationCount > 0 && this.isWindowStateTerminal(state)) {
+      state.hasWork = false;
+      state.lastUnknownWorkAt = 0;
+      state.activeConversationIds.clear();
+      return { protected: false };
+    }
+
+    if (state.lastUnknownWorkAt && now - state.lastUnknownWorkAt < UNKNOWN_WORK_PROTECTION_MS) {
+      return {
+        protected: true,
+        reason: "recent-uncommitted-work",
+        ageMs: now - state.lastUnknownWorkAt,
+      };
+    }
+
+    state.hasWork = false;
+    state.activeConversationIds.clear();
+    return { protected: false };
+  }
+
+  async getManagedWindowCleanupDecision(
+    windowId,
+    candidate = null,
+    { socket = null, source = "cleanup" } = {}
+  ) {
+    if (!Number.isInteger(windowId) || windowId <= 0) {
+      return { close: false, reason: "invalid-window-id" };
+    }
+
+    const state = this.windowStates.get(windowId);
+    const socketId = socket ? this.browserSocketIds.get(socket) : null;
+
+    if (candidate) {
+      const reconnectRequeueMs = this.getBrowserReconnectRequeueMs();
+      if (reconnectRequeueMs > 0) {
+        return {
+          close: false,
+          reason: "browser-reconnect-settling",
+          requeueAfterMs: reconnectRequeueMs,
+          browserSocketCount: this.browserSockets.size,
+          socketId,
+          state: this.summarizeWindowState(state),
+        };
+      }
+    }
+
+    const workProtection = await this.getWindowWorkProtection(state);
+    if (workProtection.protected) {
+      return {
+        close: false,
+        reason: workProtection.reason,
+        source,
+        workProtection,
+        socketId,
+        state: this.summarizeWindowState(state),
+      };
+    }
+
+    if (state?.lastActivityAt && !state.hasWork) {
+      const activityAgeMs = Date.now() - state.lastActivityAt;
+      if (activityAgeMs < RECENT_IDLE_WINDOW_RECHECK_MS) {
+        return {
+          close: false,
+          reason: "recent-window-activity",
+          requeueAfterMs: RECENT_IDLE_WINDOW_RECHECK_MS - activityAgeMs,
+          activityAgeMs,
+          socketId,
+          state: this.summarizeWindowState(state),
+        };
+      }
+    }
+
+    return {
+      close: true,
+      reason: "eligible",
+      source,
+      socketId,
+      liveTracked: this.isWindowLiveTracked(windowId),
+      state: this.summarizeWindowState(state),
+    };
+  }
+
+  normalizeManagedWindowCleanupArgs(args) {
+    const request = Array.isArray(args) ? args[0] : args;
+    const rawWindowIds = Array.isArray(request)
+      ? request
+      : Array.isArray(request?.windowIds)
+        ? request.windowIds
+        : [];
+    const windowIds = [
+      ...new Set(
+        rawWindowIds
+          .map((windowId) => Number(windowId))
+          .filter((windowId) => Number.isInteger(windowId) && windowId > 0)
+      ),
+    ];
+
+    return {
+      request,
+      windowIds,
+      cleanAll: Boolean(request && !Array.isArray(request) && request.cleanAll),
+    };
+  }
+
+  async getProtectedManagedWindowIds() {
+    const protectedWindowIds = [];
+    for (const state of this.windowStates.values()) {
+      const protection = await this.getWindowWorkProtection(state);
+      if (protection.protected) {
+        protectedWindowIds.push({
+          windowId: state.windowId,
+          reason: protection.reason,
+        });
+      }
+    }
+    return protectedWindowIds;
+  }
+
+  async cleanupManagedWindows(socket, args) {
+    const cleanup = this.normalizeManagedWindowCleanupArgs(args);
+    const forwardedWindowIds = [];
+    const skippedWindows = [];
+    const requeuedWindows = [];
+
+    if (cleanup.cleanAll && cleanup.windowIds.length === 0) {
+      const protectedWindowIds = await this.getProtectedManagedWindowIds();
+      if (protectedWindowIds.length > 0) {
+        logger.info(
+          "runtime.managed_window_cleanup.clean_all_blocked",
+          "Blocked cleanAll managed window cleanup because protected work windows exist",
+          {
+            protectedWindowIds,
+          }
+        );
+        return {
+          success: true,
+          skipped: true,
+          closed: 0,
+          reason: "protected-work-windows",
+          protectedWindowIds,
+        };
+      }
+
+      logger.info(
+        "runtime.managed_window_cleanup.clean_all_forwarded",
+        "Forwarding cleanAll managed window cleanup request",
+        {
+          browserSocketCount: this.browserSockets.size,
+        }
+      );
+      const result = await this.invokeIpc("codebuddy:cleanupWindows", [
+        {
+          windowIds: [],
+          cleanAll: true,
+        },
+      ]);
+      for (const windowId of [...this.windowStates.keys()]) {
+        this.forgetWindowState(windowId);
+      }
+      return result;
+    }
+
+    for (const windowId of cleanup.windowIds) {
+      const decision = await this.getManagedWindowCleanupDecision(windowId, null, {
+        socket,
+        source: "agent-manager-cleanup",
+      });
+      if (decision.close) {
+        forwardedWindowIds.push(windowId);
+      } else {
+        skippedWindows.push({ windowId, reason: decision.reason });
+        if (decision.requeueAfterMs) {
+          this.queueManagedWindowCleanup(windowId, {
+            socketId: this.browserSocketIds.get(socket),
+            source: "agent-manager-cleanup-recheck",
+          });
+          requeuedWindows.push({
+            windowId,
+            reason: decision.reason,
+            requeueAfterMs: decision.requeueAfterMs,
+          });
+        }
+      }
+    }
+
+    if (requeuedWindows.length > 0) {
+      this.schedulePendingManagedWindowCleanup(
+        Math.min(...requeuedWindows.map((entry) => entry.requeueAfterMs))
+      );
+    }
+
+    logger.info(
+      "runtime.managed_window_cleanup.filtered",
+      "Filtered Agent Manager managed window cleanup request",
+      {
+        requestedWindowIds: cleanup.windowIds,
+        forwardedWindowIds,
+        skippedWindows,
+        requeuedWindows,
+        requestedCleanAll: cleanup.cleanAll,
+      }
+    );
+
+    if (forwardedWindowIds.length === 0) {
+      return {
+        success: true,
+        skipped: true,
+        closed: 0,
+        reason: cleanup.cleanAll ? "cleanAll-blocked-by-remote-guard" : "no-eligible-windows",
+        skippedWindows,
+        requeuedWindows,
+      };
+    }
+
+    const result = await this.invokeIpc("codebuddy:cleanupWindows", [
+      {
+        windowIds: forwardedWindowIds,
+        cleanAll: false,
+      },
+    ]);
+    for (const windowId of forwardedWindowIds) {
+      this.forgetWindowState(windowId);
+    }
+
+    return {
+      ...(result && typeof result === "object" ? result : { result }),
+      remoteFiltered: true,
+      requestedWindowIds: cleanup.windowIds,
+      forwardedWindowIds,
+      skippedWindows,
+      requeuedWindows,
+    };
+  }
+
+  async closeManagedWindowSafely(socket, args, { candidate = null, source = "close-request" } = {}) {
+    const request = Array.isArray(args) ? args[0] : args;
+    const windowId = Number(request?.windowId);
+    if (!Number.isInteger(windowId) || windowId <= 0) {
+      return {
+        success: false,
+        reason: "invalid-window-id",
+      };
+    }
+
+    const decision = await this.getManagedWindowCleanupDecision(windowId, candidate, {
+      socket,
+      source,
+    });
+    if (!decision.close) {
+      logger.info(
+        "runtime.managed_window_cleanup.skipped",
+        "Skipped managed window close request",
+        {
+          windowId,
+          source,
+          reason: decision.reason,
+          decision,
+        }
+      );
+      return {
+        success: true,
+        skipped: true,
+        protected: true,
+        reason: decision.reason,
+        requeueAfterMs: decision.requeueAfterMs,
+      };
+    }
+
+    return this.invokeIpc("codebuddy:closeManagedWindow", args || []);
   }
 
   async closePendingManagedWindows() {
@@ -864,33 +1860,46 @@ class BridgeRuntime {
       return;
     }
 
-    const windowIds = [...this.pendingManagedWindowIds];
+    const pendingWindows = [...this.pendingManagedWindowIds.values()];
     this.pendingManagedWindowIds.clear();
     logger.info("runtime.managed_window_cleanup.started", "Closing previous managed windows", {
-      windowIds,
+      windowIds: pendingWindows.map((entry) => entry.windowId),
+      pendingWindows,
     });
 
-    for (const windowId of windowIds) {
+    for (const candidate of pendingWindows) {
       try {
-        const result = await this.invokeIpc("codebuddy:closeManagedWindow", [{ windowId }]);
+        const result = await this.closeManagedWindowSafely(null, [{ windowId: candidate.windowId }], {
+          candidate,
+          source: "delayed-pending-cleanup",
+        });
         if (result?.closed || result?.alreadyClosed) {
           logger.info("runtime.managed_window_cleanup.closed", "Closed previous managed window", {
-            windowId,
+            windowId: candidate.windowId,
             result,
           });
+          this.forgetWindowState(candidate.windowId);
           continue;
         }
 
         if (result?.reason) {
           logger.info("runtime.managed_window_cleanup.skipped", "Skipped previous managed window cleanup", {
-            windowId,
+            windowId: candidate.windowId,
             reason: result.reason,
             result,
           });
+          if (result.requeueAfterMs) {
+            this.pendingManagedWindowIds.set(candidate.windowId, {
+              ...candidate,
+              source: "recent-activity-recheck",
+              queuedAt: Date.now(),
+            });
+            this.schedulePendingManagedWindowCleanup(result.requeueAfterMs);
+          }
         }
       } catch (error) {
         logger.warn("runtime.managed_window_cleanup.close_error", "Failed to close previous managed window", {
-          windowId,
+          windowId: candidate.windowId,
           error,
         });
       }
@@ -1133,7 +2142,7 @@ class BridgeRuntime {
   }
 
   async openDynamicPort(socket, windowId, nonce, portId) {
-    this.trackSocketWindow(socket, windowId);
+    this.trackSocketWindow(socket, windowId, { portId, reason: "dynamic-port-open" });
     this.portClients.set(portId, socket);
     logger.info("dynamic_port.open", "Opening dynamic port", {
       windowId,
@@ -1153,6 +2162,7 @@ class BridgeRuntime {
     if (socket) {
       this.portClients.set(portId, socket);
     }
+    this.markPortActivity(portId, payload, "browser-to-workbuddy");
 
     logger.debug("dynamic_port.browser_to_workbuddy", "Browser posted dynamic port message", {
       portId,
@@ -1176,6 +2186,12 @@ class BridgeRuntime {
 
   async closePort(portId) {
     this.portClients.delete(portId);
+    const portState = this.portStates.get(portId);
+    if (portState) {
+      const windowState = this.windowStates.get(portState.windowId);
+      windowState?.portIds.delete(portId);
+      this.portStates.delete(portId);
+    }
     logger.info("dynamic_port.close", "Closing dynamic port", { portId });
     await this.withCdpRecovery(() =>
       this.cdp.evaluate(`globalThis.__workbuddyBridge.closePort(${JSON.stringify(portId)})`)
@@ -1321,6 +2337,13 @@ class BridgeRuntime {
     });
 
     if (payload.type === "dynamic-port-ready") {
+      const portState = this.portStates.get(payload.portId);
+      if (portState) {
+        const windowState = this.getWindowState(portState.windowId);
+        if (windowState) {
+          windowState.lastActivityAt = Date.now();
+        }
+      }
       const socket = this.portClients.get(payload.portId);
       if (socket) {
         this.sendToSocket(socket, payload);
@@ -1337,6 +2360,9 @@ class BridgeRuntime {
     }
 
     if (payload.type === "port-message" || payload.type === "port-message-error") {
+      if (payload.type === "port-message") {
+        this.markPortActivity(payload.portId, payload.payload, "workbuddy-to-browser");
+      }
       const socket = this.portClients.get(payload.portId);
       if (socket) {
         this.sendToSocket(socket, payload);
@@ -1347,6 +2373,9 @@ class BridgeRuntime {
     if (payload.type === "ipc-event") {
       if (payload.channel === AUTH_SESSION_CHANNEL) {
         this.cacheAuthSession(payload.args?.[0]);
+      }
+      for (const arg of payload.args || []) {
+        this.applySessionSignalsToTrackedWindows(arg, `ipc-event:${payload.channel || ""}`);
       }
       this.broadcast(payload);
     }
