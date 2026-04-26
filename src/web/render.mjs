@@ -3527,12 +3527,7 @@ function renderShimJs() {
     if (bootstrapResult?.status === "fulfilled") {
       applyBootstrap(bootstrapResult.value);
     } else {
-      console.warn("[bridge] Falling back to cached bootstrap data", bootstrapResult?.reason);
-      runtimeConfig = {};
-      bridgeUiConfig = {};
-      hostConnected = false;
-      saveAuthSession(loadStoredAuthSession());
-      setBridgeStatus(t("bootstrapUnavailable"));
+      throw bootstrapResult?.reason || new Error("Failed to load bridge bootstrap");
     }
 
     globalThis.__WB_APP_OUT_BASE_URL__ = new URL("/mirror/resources/app/out/", location.origin).href;
@@ -3805,7 +3800,7 @@ function renderShimJs() {
       return runtimeConfig;
     },
     async resolveConfiguration() {
-      await waitForActiveConnection();
+      await readyPromise;
       return runtimeConfig;
     },
   };
