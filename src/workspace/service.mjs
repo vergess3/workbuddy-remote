@@ -30,7 +30,6 @@ const RESERVED_WINDOWS_NAMES = new Set([
   "LPT8",
   "LPT9",
 ]);
-const UPLOAD_WRITE_BUFFER_BYTES = 1024 * 1024;
 
 function normalizeDriveLetter(input) {
   const raw = typeof input === "string" ? input.trim().toUpperCase() : "";
@@ -370,13 +369,7 @@ async function uploadWorkspaceFile(folderPath, fileName, readable) {
 
   await fs.mkdir(tempDir);
   try {
-    await pipeline(
-      readable,
-      createWriteStream(tempPath, {
-        flags: "wx",
-        highWaterMark: UPLOAD_WRITE_BUFFER_BYTES,
-      })
-    );
+    await pipeline(readable, createWriteStream(tempPath, { flags: "wx" }));
     await fs.rename(tempPath, targetPath);
   } catch (error) {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
