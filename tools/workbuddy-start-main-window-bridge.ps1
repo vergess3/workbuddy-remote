@@ -201,6 +201,60 @@ function Write-BridgeLauncherLog {
     }
 }
 
+function Invoke-WorkBuddyRemoteLogRetention {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [int64]$MaxFileBytes = 52428800,
+
+        [int64]$MaxDirectoryBytes = 314572800,
+
+        [int]$MaxAgeHours = 24
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory) -or -not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+
+    $cutoff = (Get-Date).AddHours(-1 * $MaxAgeHours)
+    $files = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.log(\.|$)' })
+
+    foreach ($file in $files) {
+        if ($file.LastWriteTime -lt $cutoff) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $files = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.log(\.|$)' } |
+        Sort-Object LastWriteTime)
+
+    foreach ($file in $files) {
+        if ($file.Length -gt $MaxFileBytes) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $files = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.log(\.|$)' } |
+        Sort-Object LastWriteTime)
+    $totalBytes = ($files | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $totalBytes) {
+        $totalBytes = 0
+    }
+
+    foreach ($file in $files) {
+        if ($totalBytes -le $MaxDirectoryBytes) {
+            break
+        }
+
+        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        $totalBytes -= $file.Length
+    }
+}
+
 function Stop-PortProcess {
     param(
         [int]$Port,
@@ -461,6 +515,7 @@ try {
     $exePath = Find-WorkBuddyExecutable -ScriptDir $scriptDir -Config $config
     $runtimeRoot = Get-WorkBuddyRemoteRuntimeRoot -ScriptDir $scriptDir -Config $config
     $tmpDir = Get-WorkBuddyRemoteTempDir -ScriptDir $scriptDir -Config $config
+    $projectRoot = Get-WorkBuddyRemoteProjectRoot -ScriptDir $scriptDir
     New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
@@ -476,6 +531,16 @@ try {
     $primaryAccessHost = if ($normalizedListenHost -eq "0.0.0.0") { "127.0.0.1" } else { $ListenHost }
     $healthUrl = "http://$primaryAccessHost`:$BridgePort/readyz"
     $primaryUrl = "http://$primaryAccessHost`:$BridgePort/agent-manager/"
+
+    $logRetentionDirs = @(
+        $tmpDir,
+        (Join-Path $projectRoot ".playwright-cli"),
+        (Join-Path $runtimeRoot "debug-user-data\logs"),
+        (Join-Path $runtimeRoot "workbuddy-user-data\logs")
+    )
+    foreach ($logRetentionDir in $logRetentionDirs) {
+        Invoke-WorkBuddyRemoteLogRetention -Directory $logRetentionDir
+    }
 
     if (-not (Test-Path $UserDataDir)) {
         New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null

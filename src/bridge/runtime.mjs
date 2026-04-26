@@ -35,6 +35,13 @@ const PROTECTED_WINDOW_STATUS_CHECK_MS = 30_000;
 const TERMINAL_WINDOW_CLEANUP_DELAY_MS = 2_000;
 const UNKNOWN_WORK_PROTECTION_MS = 10 * 60 * 1000;
 const ACTIVE_SESSION_STALE_MS = 15 * 60 * 1000;
+const CHECK_PATH_EXISTS_CHANNEL = "codebuddy:checkPathExists";
+const CHECK_PATH_EXISTS_CACHE_TTL_MS = 60_000;
+const CHECK_PATH_EXISTS_CACHE_MAX_ENTRIES = 512;
+const CODEBUDDY_PATH_CHECK_INTERVAL_FROM =
+  "let At=setInterval(tt,1e4);return()=>{Ke=!0,clearInterval(At)}},[i,o]);";
+const CODEBUDDY_PATH_CHECK_INTERVAL_TO =
+  "let At=setInterval(tt,6e4);return()=>{Ke=!0,clearInterval(At)}},[i,o]);";
 const TRANSIENT_CONVERSATION_IDS = new Set(["__new__"]);
 const WORK_SIGNAL_KEYS = new Set([
   "conversationId",
@@ -221,6 +228,14 @@ function createHashVersion(parts) {
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 16);
+}
+
+function createIpcCacheKey(args) {
+  try {
+    return JSON.stringify(args ?? []);
+  } catch {
+    return null;
+  }
 }
 
 class CdpClient {
@@ -624,6 +639,7 @@ class BridgeRuntime {
     this.shimJs = null;
     this.patchedCodeBuddyMainJs = null;
     this.assetVersion = "";
+    this.checkPathExistsCache = new Map();
   }
 
   async initialize() {
@@ -998,12 +1014,22 @@ class BridgeRuntime {
       throw new Error("Unable to patch codebuddy/main.js: expected patch anchor not found");
     }
 
-    return source
+    const patched = source
       .replace(exposeLocalAttachHookFrom, exposeLocalAttachHookTo)
       .replace(closeLocalAttachHookFrom, closeLocalAttachHookTo)
       .replace(eagerWarmupFrom, eagerWarmupTo)
       .replace(deferWarmupFrom, deferWarmupTo)
       .replace(disableWarmPoolFrom, disableWarmPoolTo);
+
+    if (patched.includes(CODEBUDDY_PATH_CHECK_INTERVAL_FROM)) {
+      return patched.replace(CODEBUDDY_PATH_CHECK_INTERVAL_FROM, CODEBUDDY_PATH_CHECK_INTERVAL_TO);
+    }
+
+    logger.warn(
+      "runtime.codebuddy.patch.path_check_interval_anchor_missing",
+      "Unable to slow codebuddy path-exists polling; expected patch anchor was not found"
+    );
+    return patched;
   }
 
   getBrowserSocketId(socket) {
@@ -1920,18 +1946,98 @@ class BridgeRuntime {
     }
   }
 
-  sendToSocket(socket, message) {
+  sendToSocket(socket, message, { log = true } = {}) {
     if (socket.readyState === WebSocket.OPEN) {
       const payload = JSON.stringify(message);
-      logger.debug("websocket.bridge_to_browser", "Bridge sent browser message", {
-        message: summarizeMessage(message),
-        bytes: Buffer.byteLength(payload),
-      });
+      if (log) {
+        logger.debug("websocket.bridge_to_browser", "Bridge sent browser message", {
+          message: summarizeMessage(message),
+          bytes: Buffer.byteLength(payload),
+        });
+      }
       socket.send(payload);
     }
   }
 
+  pruneCheckPathExistsCache(now = Date.now()) {
+    if (this.checkPathExistsCache.size <= CHECK_PATH_EXISTS_CACHE_MAX_ENTRIES) {
+      return;
+    }
+
+    for (const [key, entry] of this.checkPathExistsCache) {
+      if (!entry.pending && entry.expiresAt <= now) {
+        this.checkPathExistsCache.delete(key);
+      }
+    }
+
+    while (this.checkPathExistsCache.size > CHECK_PATH_EXISTS_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.checkPathExistsCache.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.checkPathExistsCache.delete(oldestKey);
+    }
+  }
+
+  setCheckPathExistsCacheEntry(key, result, now = Date.now(), ttlMs = CHECK_PATH_EXISTS_CACHE_TTL_MS) {
+    this.checkPathExistsCache.set(key, {
+      result,
+      expiresAt: now + ttlMs,
+      pending: null,
+    });
+    this.pruneCheckPathExistsCache(now);
+  }
+
+  async invokeCachedCheckPathExists(args) {
+    const key = createIpcCacheKey(args);
+    if (!key) {
+      return this.invokeIpcDirect(CHECK_PATH_EXISTS_CHANNEL, args);
+    }
+
+    const now = Date.now();
+    const cached = this.checkPathExistsCache.get(key);
+    if (cached?.pending) {
+      return cached.pending;
+    }
+    if (cached && cached.expiresAt > now) {
+      return cached.result;
+    }
+
+    const pending = this.invokeIpcDirect(CHECK_PATH_EXISTS_CHANNEL, args)
+      .then((result) => {
+        this.setCheckPathExistsCacheEntry(key, result);
+        return result;
+      })
+      .catch((error) => {
+        if (cached && cached.expiresAt > 0) {
+          this.setCheckPathExistsCacheEntry(key, cached.result, Date.now(), 5000);
+          logger.warn("ipc.check_path_exists.stale_result", "Returned stale path-exists result after IPC failure", {
+            error,
+          });
+          return cached.result;
+        }
+        this.checkPathExistsCache.delete(key);
+        throw error;
+      });
+
+    this.checkPathExistsCache.set(key, {
+      result: cached?.result,
+      expiresAt: cached?.expiresAt ?? 0,
+      pending,
+    });
+    this.pruneCheckPathExistsCache(now);
+    return pending;
+  }
+
   async invokeIpc(channel, args) {
+    if (channel === CHECK_PATH_EXISTS_CHANNEL) {
+      return this.invokeCachedCheckPathExists(args);
+    }
+
+    return this.invokeIpcDirect(channel, args);
+  }
+
+  async invokeIpcDirect(channel, args) {
     logger.debug("ipc.invoke", "Invoking WorkBuddy IPC channel", {
       channel,
       args: summarizeValue(args),
@@ -2297,6 +2403,11 @@ class BridgeRuntime {
     };
   }
 
+  isLocalPathOpenRequest(request) {
+    const url = typeof request?.url === "string" ? request.url.trim() : "";
+    return Boolean(url && (/^file:/iu.test(url) || /^[A-Za-z]:[\\/]/u.test(url)));
+  }
+
   forwardOpenExternal(portId, request) {
     const socket = this.portClients.get(portId);
     if (!socket) {
@@ -2309,10 +2420,18 @@ class BridgeRuntime {
       rpcId: request.rpcId,
       backendRequestId: request.backendRequestId,
     });
-    this.sendToSocket(socket, {
-      type: "open-external",
-      url: request.url,
-    });
+    this.sendToSocket(
+      socket,
+      this.isLocalPathOpenRequest(request)
+        ? {
+            type: "open-file-manager",
+            targetPath: request.url,
+          }
+        : {
+            type: "open-external",
+            url: request.url,
+          }
+    );
     this.sendToSocket(socket, {
       type: "port-message",
       portId,

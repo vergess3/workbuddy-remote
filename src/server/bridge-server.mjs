@@ -35,6 +35,11 @@ const REVALIDATED_STATIC_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const COMPRESSIBLE_EXTENSIONS = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg"]);
 const MAX_COMPRESSED_STATIC_ASSET_BYTES = 1024 * 1024;
 const BOOTSTRAP_CONFIG_TIMEOUT_MS = 12000;
+const HIGH_VOLUME_IPC_CHANNELS = new Set(["codebuddy:checkPathExists"]);
+
+function shouldLogBrowserMessage(message) {
+  return !(message?.type === "invoke" && HIGH_VOLUME_IPC_CHANNELS.has(message.channel));
+}
 
 function isCompressibleAsset(filePath) {
   return COMPRESSIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
@@ -474,7 +479,10 @@ function attachWebSocketServer(server, runtime, auth) {
         return;
       }
 
-      logger.debug("websocket.browser_to_bridge", "Browser sent bridge message", summarizeMessage(message));
+      const logBrowserMessage = shouldLogBrowserMessage(message);
+      if (logBrowserMessage) {
+        logger.debug("websocket.browser_to_bridge", "Browser sent bridge message", summarizeMessage(message));
+      }
 
       try {
         if (message.type === "invoke") {
@@ -490,11 +498,15 @@ function attachWebSocketServer(server, runtime, auth) {
           } else {
             result = await runtime.invokeIpc(message.channel, message.args || []);
           }
-          runtime.sendToSocket(socket, {
-            id: message.id,
-            ok: true,
-            result,
-          });
+          runtime.sendToSocket(
+            socket,
+            {
+              id: message.id,
+              ok: true,
+              result,
+            },
+            { log: logBrowserMessage }
+          );
           return;
         }
 

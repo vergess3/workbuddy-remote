@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 const LEVELS = new Map([
   ["debug", 10],
   ["info", 20],
@@ -8,6 +11,10 @@ const DEFAULT_LEVEL = "debug";
 const MAX_STRING_LENGTH = 180;
 const MAX_ARRAY_ITEMS = 6;
 const MAX_OBJECT_KEYS = 12;
+const LOG_RETENTION_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const LOG_RETENTION_MAX_DIR_BYTES = 300 * 1024 * 1024;
+const LOG_RETENTION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LOG_RETENTION_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const REDACTED_KEY_PATTERN = /password|token|secret|authorization|cookie|hash|credential|session/i;
 
 function normalizeLevel(level) {
@@ -17,9 +24,91 @@ function normalizeLevel(level) {
 
 const activeLevel = normalizeLevel(process.env.WORKBUDDY_REMOTE_LOG_LEVEL);
 const eventLogPath = process.env.WORKBUDDY_REMOTE_EVENT_LOG_PATH || "";
+let lastRetentionAt = 0;
 
 function shouldLog(level) {
   return LEVELS.get(level) >= LEVELS.get(activeLevel);
+}
+
+function isLogFileName(name) {
+  return /\.log(?:\.|$)/i.test(name);
+}
+
+function rotateEventLogIfNeeded() {
+  if (!eventLogPath) {
+    return;
+  }
+
+  try {
+    const stats = fs.statSync(eventLogPath);
+    if (!stats.isFile() || stats.size < LOG_RETENTION_MAX_FILE_BYTES) {
+      return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.renameSync(eventLogPath, `${eventLogPath}.${timestamp}`);
+  } catch {
+    // Logging maintenance must not break the bridge.
+  }
+}
+
+function enforceLogRetention() {
+  if (!eventLogPath) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastRetentionAt < LOG_RETENTION_CHECK_INTERVAL_MS) {
+    return;
+  }
+  lastRetentionAt = now;
+
+  rotateEventLogIfNeeded();
+
+  let dir;
+  try {
+    dir = path.dirname(eventLogPath);
+  } catch {
+    return;
+  }
+
+  let entries;
+  try {
+    entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && isLogFileName(entry.name))
+      .map((entry) => {
+        const filePath = path.join(dir, entry.name);
+        const stats = fs.statSync(filePath);
+        return { filePath, size: stats.size, mtimeMs: stats.mtimeMs };
+      });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (now - entry.mtimeMs > LOG_RETENTION_MAX_AGE_MS) {
+      try {
+        fs.rmSync(entry.filePath, { force: true });
+        entry.deleted = true;
+      } catch {}
+    }
+  }
+
+  const remaining = entries
+    .filter((entry) => !entry.deleted)
+    .sort((left, right) => left.mtimeMs - right.mtimeMs);
+  let totalBytes = remaining.reduce((sum, entry) => sum + entry.size, 0);
+
+  for (const entry of remaining) {
+    if (totalBytes <= LOG_RETENTION_MAX_DIR_BYTES) {
+      break;
+    }
+    try {
+      fs.rmSync(entry.filePath, { force: true });
+      totalBytes -= entry.size;
+    } catch {}
+  }
 }
 
 function summarizeString(value) {
@@ -168,6 +257,7 @@ function log(level, event, message, details = {}) {
 
   if (eventLogPath) {
     try {
+      enforceLogRetention();
       fs.appendFileSync(eventLogPath, `${line}\n`, "utf8");
     } catch {
       // Logging must not break the bridge.
@@ -199,4 +289,3 @@ const logger = {
 };
 
 export { logger, summarizeError, summarizeMessage, summarizeValue };
-import fs from "node:fs";
