@@ -304,11 +304,31 @@ function createRequestHandler(runtime, auth) {
         }
 
         if (req.method === "POST") {
+          const uploadId = requestUrl.searchParams.get("uploadId");
+          const totalBytes = Number(req.headers["content-length"] || 0);
+          let lastProgressAt = 0;
+          const onProgress = uploadId
+            ? (loadedBytes) => {
+                const now = Date.now();
+                if (loadedBytes < totalBytes && now - lastProgressAt < 150) {
+                  return;
+                }
+                lastProgressAt = now;
+                runtime.broadcast({
+                  type: "workspace-upload-progress",
+                  uploadId,
+                  loadedBytes,
+                  totalBytes,
+                });
+              }
+            : undefined;
           const result = await uploadWorkspaceFile(
             requestUrl.searchParams.get("folderPath"),
             requestUrl.searchParams.get("fileName"),
-            req
+            req,
+            onProgress
           );
+          onProgress?.(totalBytes);
           json(res, 200, result);
           return;
         }

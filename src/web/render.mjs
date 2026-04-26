@@ -59,6 +59,7 @@ function renderShimJs() {
   const listeners = new Map();
   const onceWrappers = new WeakMap();
   const pending = new Map();
+  const pendingUploadProgress = new Map();
   const acquiredPorts = new Map();
   const livePorts = new Map();
   const pendingPortOpenByWindow = new Map();
@@ -147,7 +148,6 @@ function renderShimJs() {
       selectedFilesHint:
         "已选择文件，点击这里可重新选择，或直接继续拖拽替换。",
       uploadProgress: "正在上传：{percent}% ({loaded} / {total})",
-      uploadSaving: "正在保存文件...",
       currentWorkspace: "当前工作空间：{path}",
       noWorkspaceAvailable: "还没有可用的工作空间。",
       failedLoadWorkspaces: "加载工作空间失败。",
@@ -241,7 +241,6 @@ function renderShimJs() {
       selectedFilesHint:
         "Files selected. Click here to choose again, or drag more files here to replace them.",
       uploadProgress: "Uploading: {percent}% ({loaded} / {total})",
-      uploadSaving: "Saving file...",
       currentWorkspace: "Current workspace: {path}",
       noWorkspaceAvailable: "No workspace is available yet.",
       failedLoadWorkspaces: "Failed to load workspaces.",
@@ -1320,20 +1319,22 @@ function renderShimJs() {
 
   const uploadWorkspaceFile = (folderPath, file, onProgress) => {
     return new Promise((resolve, reject) => {
+      const uploadId = crypto.randomUUID();
       const params = new URLSearchParams({
         folderPath,
         fileName: file.name,
+        uploadId,
       });
       const request = new XMLHttpRequest();
+      pendingUploadProgress.set(uploadId, (message) => {
+        onProgress?.(Math.min(file.size, Number(message.loadedBytes) || 0));
+      });
+      const cleanup = () => pendingUploadProgress.delete(uploadId);
       request.open("POST", "/bridge/workspace-files?" + params.toString());
       request.responseType = "json";
       request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-      request.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          onProgress?.(event.loaded);
-        }
-      };
       request.onload = () => {
+        cleanup();
         if (request.status < 200 || request.status >= 300) {
           reject(new Error("Failed to upload file"));
           return;
@@ -1347,10 +1348,10 @@ function renderShimJs() {
         onProgress?.(file.size);
         resolve(result);
       };
-      request.upload.onload = () => {
-        onProgress?.(file.size, { saving: true });
+      request.onerror = () => {
+        cleanup();
+        reject(new Error("Failed to upload file"));
       };
-      request.onerror = () => reject(new Error("Failed to upload file"));
       request.send(file);
     });
   };
@@ -1359,11 +1360,10 @@ function renderShimJs() {
     const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
     let completedBytes = 0;
     for (const file of files) {
-      await uploadWorkspaceFile(folderPath, file, (loadedBytes, details = {}) => {
+      await uploadWorkspaceFile(folderPath, file, (loadedBytes) => {
         onProgress?.({
           loadedBytes: completedBytes + loadedBytes,
           totalBytes,
-          saving: details.saving,
         });
       });
       completedBytes += file.size;
@@ -1696,13 +1696,11 @@ function renderShimJs() {
           Math.max(0, Math.round((progress.loadedBytes / progress.totalBytes) * 100))
         );
         element.style.display = "flex";
-        text.textContent = progress.saving
-          ? t("uploadSaving")
-          : t("uploadProgress", {
-              percent,
-              loaded: formatFileSize(progress.loadedBytes),
-              total: formatFileSize(progress.totalBytes),
-            });
+        text.textContent = t("uploadProgress", {
+          percent,
+          loaded: formatFileSize(progress.loadedBytes),
+          total: formatFileSize(progress.totalBytes),
+        });
         bar.style.width = percent + "%";
       },
     };
@@ -3557,6 +3555,11 @@ function renderShimJs() {
           saveAuthSession(message.args?.[0]);
         }
         emit(message.channel, ...(message.args || []));
+        return;
+      }
+
+      if (message.type === "workspace-upload-progress") {
+        pendingUploadProgress.get(message.uploadId)?.(message);
         return;
       }
 

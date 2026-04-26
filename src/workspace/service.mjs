@@ -2,6 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { promises as fs, createWriteStream } from "node:fs";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { WORKSPACE_ROOT_FOLDER_NAME } from "../shared.mjs";
 import { loadConfig } from "../config.mjs";
@@ -356,7 +357,7 @@ async function listWorkspaceEntries(folderPath) {
   };
 }
 
-async function uploadWorkspaceFile(folderPath, fileName, readable) {
+async function uploadWorkspaceFile(folderPath, fileName, readable, onProgress) {
   const { normalizedPath } = await resolveWorkspaceFolderPath(folderPath);
   const validation = validateWorkspaceFileName(fileName);
   if (!validation.ok) {
@@ -369,7 +370,15 @@ async function uploadWorkspaceFile(folderPath, fileName, readable) {
 
   await fs.mkdir(tempDir);
   try {
-    await pipeline(readable, createWriteStream(tempPath, { flags: "wx" }));
+    let loadedBytes = 0;
+    const progressStream = new Transform({
+      transform(chunk, _encoding, callback) {
+        loadedBytes += chunk.length;
+        onProgress?.(loadedBytes);
+        callback(null, chunk);
+      },
+    });
+    await pipeline(readable, progressStream, createWriteStream(tempPath, { flags: "wx" }));
     await fs.rename(tempPath, targetPath);
   } catch (error) {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
