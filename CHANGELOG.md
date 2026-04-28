@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-04-29
+
+- Improved remote workspace file management, including workspace folder context selection and file transfer handling
+- Added clearer upload progress reporting across the web UI and bridge server
+- Streamed workspace file transfers to improve stability with larger uploads and downloads
+- Limited high-volume bridge logs to reduce noise and runtime overhead
+- Improved managed WorkBuddy window cleanup and bridge startup stability
+- Kept the committed default bridge listen host on `127.0.0.1` for local-only access by default
+
 ## 2026-04-24
 
 - Optimized memory management to significantly reduce memory usage
@@ -9,6 +18,15 @@
 - Fixed several known stability issues to improve the remote usage experience
 
 ## 更新说明
+
+### 2026-04-29
+
+- 改进远程工作区文件管理，包括工作区目录上下文选择和文件传输处理
+- 优化网页端和 bridge server 的上传进度提示
+- 工作区文件传输改为流式处理，提升大文件上传和下载稳定性
+- 限制高频 bridge 日志输出，减少日志噪音和运行时开销
+- 改进受管 WorkBuddy 窗口清理和 bridge 启动稳定性
+- 提交到仓库的默认 bridge 监听地址保持为 `127.0.0.1`，默认仅允许本机访问
 
 ### 2026-04-24
 

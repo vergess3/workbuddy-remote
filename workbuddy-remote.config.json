@@ -4,7 +4,7 @@
   "runtimeRootDir": "",
   "cdpPort": 9333,
   "bridgePort": 8780,
-  "listenHost": "0.0.0.0",
+  "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": false,
   "showReadyWindow": false,
   "workspaceRoots": [],
