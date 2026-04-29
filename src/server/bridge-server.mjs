@@ -24,10 +24,12 @@ import { createBridgeAccessAuth } from "./access-auth.mjs";
 import { loadConfig } from "../config.mjs";
 import {
   createWorkspaceFolder,
+  deleteWorkspaceFolder,
   deleteWorkspaceEntry,
   listAvailableWorkspaceRoots,
   listWorkspaceEntries,
   listWorkspaceFolders,
+  renameWorkspaceFolder,
   resolveWorkspaceFilePath,
   uploadWorkspaceFile,
 } from "../workspace/service.mjs";
@@ -363,6 +365,18 @@ function createRequestHandler(runtime, auth) {
         if (req.method === "POST") {
           const payload = await readJsonBody(req);
           json(res, 200, await createWorkspaceFolder(payload?.rootPath, payload?.name));
+          return;
+        }
+
+        if (req.method === "PATCH") {
+          const payload = await readJsonBody(req);
+          json(res, 200, await renameWorkspaceFolder(payload?.folderPath, payload?.name));
+          return;
+        }
+
+        if (req.method === "DELETE") {
+          const payload = await readJsonBody(req);
+          json(res, 200, await deleteWorkspaceFolder(payload?.folderPath));
           return;
         }
 

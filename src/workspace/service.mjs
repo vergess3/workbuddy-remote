@@ -290,6 +290,104 @@ async function createWorkspaceFolder(rootPath, inputName) {
   };
 }
 
+async function resolveManagedWorkspaceFolder(folderPath) {
+  const normalizedPath = normalizeWindowsPath(folderPath);
+  if (!normalizedPath) {
+    throw new Error("Missing workspace folder path.");
+  }
+
+  const { path: workspaceRoot } = await findWorkspaceRootByPath(normalizedPath);
+  if (normalizedPath.toLowerCase() === workspaceRoot.toLowerCase()) {
+    throw new Error("The workspace root cannot be managed as a workspace folder.");
+  }
+  if (path.win32.dirname(normalizedPath).toLowerCase() !== workspaceRoot.toLowerCase()) {
+    throw new Error("Only direct workspace folders can be managed.");
+  }
+
+  const stats = await fs.stat(normalizedPath);
+  if (!stats.isDirectory()) {
+    throw new Error("The selected workspace path is not a directory.");
+  }
+
+  return {
+    normalizedPath,
+    workspaceRoot,
+  };
+}
+
+async function renameWorkspaceFolder(folderPath, inputName) {
+  let resolved;
+  try {
+    resolved = await resolveManagedWorkspaceFolder(folderPath);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const validation = validateWorkspaceFolderName(inputName);
+  if (!validation.ok) {
+    return validation;
+  }
+
+  const nextPath = path.win32.join(resolved.workspaceRoot, validation.folderName);
+  if (nextPath.toLowerCase() === resolved.normalizedPath.toLowerCase()) {
+    return {
+      ok: true,
+      name: validation.folderName,
+      path: resolved.normalizedPath,
+    };
+  }
+
+  try {
+    await fs.rename(resolved.normalizedPath, nextPath);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+      return {
+        ok: false,
+        error: "That workspace folder already exists.",
+      };
+    }
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    ok: true,
+    name: validation.folderName,
+    path: nextPath,
+  };
+}
+
+async function deleteWorkspaceFolder(folderPath) {
+  let resolved;
+  try {
+    resolved = await resolveManagedWorkspaceFolder(folderPath);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    await fs.rm(resolved.normalizedPath, { recursive: true, force: false });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    ok: true,
+    path: resolved.normalizedPath,
+  };
+}
+
 function validateWorkspaceFileName(inputName) {
   const fileName = typeof inputName === "string" ? inputName.trim() : "";
   if (!fileName) {
@@ -454,6 +552,8 @@ export {
   listAvailableWorkspaceRoots,
   listWorkspaceFolders,
   createWorkspaceFolder,
+  renameWorkspaceFolder,
+  deleteWorkspaceFolder,
   listWorkspaceEntries,
   uploadWorkspaceFile,
   deleteWorkspaceEntry,

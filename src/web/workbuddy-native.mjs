@@ -78,7 +78,7 @@ function renderWorkBuddyNativeShimJs({
     zhCN: {
       fileManager: "文件管理",
       chooseWorkspaceOnHost: "选择服务器端上的工作空间",
-      chooseWorkspaceSubtitle: "先选可操作根目录，再选择一个工作空间；也可以在下拉菜单中直接新建文件夹。",
+      chooseWorkspaceSubtitle: "先选可操作根目录，再选择一个工作空间；也可以在下拉菜单中从新工作空间开始。",
       searchWorkspaces: "搜索工作空间",
       searchWorkspacePlaceholder: "输入名字过滤列表",
       chooseThisFolder: "选择此文件夹",
@@ -99,9 +99,21 @@ function renderWorkBuddyNativeShimJs({
       workspace: "工作空间",
       selectWorkspace: "请选择工作空间",
       createFolder: "+ 新建文件夹...",
+      startNewWorkspace: "从新工作空间开始...",
+      manageWorkspaces: "管理工作空间",
+      manageWorkspacesTitle: "管理工作空间",
+      newWorkspace: "新建工作空间",
+      workspaceName: "工作空间名称",
+      renameWorkspace: "改名",
+      renameWorkspaceTitle: "重命名工作空间",
+      deleteWorkspaceTitle: "删除工作空间",
+      deleteWorkspaceDescription: "确定要永久删除工作空间“{name}”及其中所有文件吗？删除后无法恢复。",
+      failedRenameWorkspace: "重命名工作空间失败。",
+      failedDeleteWorkspace: "删除工作空间失败。",
       refresh: "刷新",
       close: "关闭",
       cancel: "取消",
+      confirm: "确定",
       deleteConfirm: "确认删除",
       deleteWarning: "删除后将直接从服务器端的磁盘移除，且无法恢复。",
       fileManagerSubtitle: "只能操作服务器端允许的根目录里的文件",
@@ -128,7 +140,6 @@ function renderWorkBuddyNativeShimJs({
       noWorkspaceAvailable: "还没有可用的工作空间。",
       selectDriveFirst: "请先选择一个根目录。",
       failedLoadWorkspaces: "加载工作空间失败。",
-      promptNewFolderName: "请输入新建文件夹名称",
       emptyNewFolderName: "新建文件夹名称不能为空。",
       failedCreateWorkspace: "创建工作空间失败。",
       chooseFilesFirst: "请先选择要上传的文件。",
@@ -137,7 +148,7 @@ function renderWorkBuddyNativeShimJs({
     en: {
       fileManager: "File Manager",
       chooseWorkspaceOnHost: "Choose a workspace on the host",
-      chooseWorkspaceSubtitle: "Select an allowed root first, then choose a workspace. You can also create a new folder directly from the dropdown.",
+      chooseWorkspaceSubtitle: "Select an allowed root first, then choose a workspace. You can also start from a new workspace in the dropdown.",
       searchWorkspaces: "Search workspaces",
       searchWorkspacePlaceholder: "Type a name to filter the list",
       chooseThisFolder: "Use this folder",
@@ -158,9 +169,21 @@ function renderWorkBuddyNativeShimJs({
       workspace: "Workspace",
       selectWorkspace: "Select a workspace",
       createFolder: "+ Create new folder...",
+      startNewWorkspace: "Start from a new workspace...",
+      manageWorkspaces: "Manage workspaces",
+      manageWorkspacesTitle: "Manage workspaces",
+      newWorkspace: "New workspace",
+      workspaceName: "Workspace name",
+      renameWorkspace: "Rename",
+      renameWorkspaceTitle: "Rename workspace",
+      deleteWorkspaceTitle: "Delete workspace",
+      deleteWorkspaceDescription: "Permanently delete workspace \\"{name}\\" and all files inside it? This cannot be undone.",
+      failedRenameWorkspace: "Failed to rename workspace.",
+      failedDeleteWorkspace: "Failed to delete workspace.",
       refresh: "Refresh",
       close: "Close",
       cancel: "Cancel",
+      confirm: "OK",
       deleteConfirm: "Delete",
       deleteWarning: "This will delete the file directly from the host machine and cannot be undone.",
       fileManagerSubtitle: "Only files inside the allowed workspace roots on the host machine can be managed here.",
@@ -187,7 +210,6 @@ function renderWorkBuddyNativeShimJs({
       noWorkspaceAvailable: "No workspace is available yet.",
       selectDriveFirst: "Select a root first.",
       failedLoadWorkspaces: "Failed to load workspaces.",
-      promptNewFolderName: "Enter a name for the new folder",
       emptyNewFolderName: "The new folder name cannot be empty.",
       failedCreateWorkspace: "Failed to create the workspace.",
       chooseFilesFirst: "Choose files to upload first.",
@@ -281,6 +303,22 @@ function renderWorkBuddyNativeShimJs({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rootPath, name }),
+    });
+  }
+
+  function renameWorkspaceFolder(folderPath, name) {
+    return fetchJson("/bridge/workspace-folders", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folderPath, name }),
+    });
+  }
+
+  function deleteWorkspaceFolder(folderPath) {
+    return fetchJson("/bridge/workspace-folders", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folderPath }),
     });
   }
 
@@ -797,7 +835,7 @@ function renderWorkBuddyNativeShimJs({
       workspaceField.appendChild(workspaceSelect);
       const createWorkspaceOption = document.createElement("option");
       createWorkspaceOption.value = "__create_workspace__";
-      createWorkspaceOption.textContent = t("createFolder");
+      createWorkspaceOption.textContent = t("startNewWorkspace");
 
       const refreshButton = document.createElement("button");
       refreshButton.type = "button";
@@ -856,13 +894,20 @@ function renderWorkBuddyNativeShimJs({
         reject(error);
       };
 
+      const getFilteredFolders = () => {
+        const keyword = searchInput.value.trim().toLowerCase();
+        return keyword
+          ? folders.filter((folder) => folder.name.toLowerCase().includes(keyword))
+          : [...folders];
+      };
+
       const renderWorkspaceOptions = () => {
         workspaceSelect.replaceChildren();
         const placeholder = document.createElement("option");
         placeholder.value = "";
         placeholder.textContent = loading ? t("loadingWorkspaces") : t("selectWorkspace");
         workspaceSelect.appendChild(placeholder);
-        for (const folder of folders) {
+        for (const folder of getFilteredFolders()) {
           const option = document.createElement("option");
           option.value = folder.path;
           option.textContent = folder.name;
@@ -873,10 +918,8 @@ function renderWorkBuddyNativeShimJs({
       };
 
       const applyFilter = () => {
-        const keyword = searchInput.value.trim().toLowerCase();
-        filteredFolders = keyword
-          ? folders.filter((folder) => folder.name.toLowerCase().includes(keyword))
-          : [...folders];
+        filteredFolders = getFilteredFolders();
+        renderWorkspaceOptions();
         listWrapper.replaceChildren();
         if (!selectedRootPath) {
           emptyState.textContent = t("selectDriveFirst");
@@ -972,32 +1015,15 @@ function renderWorkBuddyNativeShimJs({
       rootSelect.addEventListener("change", () => loadRootFolders(rootSelect.value).catch(fail));
       workspaceSelect.addEventListener("change", async () => {
         if (workspaceSelect.value === "__create_workspace__") {
-          if (!selectedRootPath) {
-            window.alert(t("selectDriveFirst"));
-            renderWorkspaceOptions();
-            return;
-          }
-          const folderName = window.prompt(t("promptNewFolderName"), "");
-          if (folderName === null) {
-            renderWorkspaceOptions();
-            return;
-          }
-          const trimmedName = folderName.trim();
-          if (!trimmedName) {
-            window.alert(t("emptyNewFolderName"));
-            renderWorkspaceOptions();
-            return;
-          }
           try {
-            const result = await createWorkspaceFolder(selectedRootPath, trimmedName);
-            if (!result?.ok || !result.path) {
-              window.alert(result?.error || t("failedCreateWorkspace"));
-              renderWorkspaceOptions();
-              return;
+            const result = await promptAndCreateWorkspace(selectedRootPath);
+            if (result?.path) {
+              await loadRootFolders(selectedRootPath, result.path);
             }
-            await loadRootFolders(selectedRootPath, result.path);
           } catch (error) {
             window.alert(error instanceof Error ? error.message : String(error));
+          } finally {
+            renderWorkspaceOptions();
           }
           return;
         }
@@ -1143,6 +1169,341 @@ function renderWorkBuddyNativeShimJs({
     });
   }
 
+  function promptTextInput(title, label, defaultValue = "") {
+    return new Promise((resolveInput) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:24px;";
+      const panel = document.createElement("div");
+      panel.style.cssText = "width:min(440px,100%);border-radius:16px;background:#141824;color:#eef2ff;box-shadow:0 24px 64px rgba(0,0,0,.42);border:1px solid #2c3350;overflow:hidden;";
+      overlay.appendChild(panel);
+      const header = document.createElement("div");
+      header.style.cssText = "padding:18px 20px 12px;font-size:18px;font-weight:700;";
+      header.textContent = title;
+      panel.appendChild(header);
+      const body = document.createElement("label");
+      body.style.cssText = "padding:0 20px 18px;display:flex;flex-direction:column;gap:8px;color:#9aa4c7;font-size:12px;";
+      body.textContent = label;
+      panel.appendChild(body);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = defaultValue || "";
+      input.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;outline:none;font:14px/1.4 'Segoe UI',sans-serif;";
+      body.appendChild(input);
+      const footer = document.createElement("div");
+      footer.style.cssText = "padding:0 20px 20px;display:flex;justify-content:flex-end;gap:10px;";
+      panel.appendChild(footer);
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = t("cancel");
+      cancel.style.cssText = "height:38px;padding:0 14px;border:1px solid #39415d;border-radius:10px;background:#101528;color:#d9e0ff;cursor:pointer;";
+      footer.appendChild(cancel);
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.textContent = t("confirm");
+      confirm.style.cssText = "height:38px;padding:0 14px;border:none;border-radius:10px;background:#6ea8fe;color:#09111f;font-weight:800;cursor:pointer;";
+      footer.appendChild(confirm);
+      const cleanup = (value) => {
+        document.removeEventListener("keydown", onKeyDown, true);
+        overlay.remove();
+        resolveInput(value);
+      };
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cleanup(null);
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          cleanup(input.value);
+        }
+      };
+      cancel.addEventListener("click", () => cleanup(null));
+      confirm.addEventListener("click", () => cleanup(input.value));
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) {
+          cleanup(null);
+        }
+      });
+      document.addEventListener("keydown", onKeyDown, true);
+      document.body.appendChild(overlay);
+      input.focus();
+      input.select();
+    });
+  }
+
+  async function promptAndCreateWorkspace(rootPath) {
+    if (!rootPath) {
+      window.alert(t("selectDriveFirst"));
+      return null;
+    }
+    const folderName = await promptTextInput(t("newWorkspace"), t("workspaceName"), "");
+    if (folderName === null) {
+      return null;
+    }
+    const trimmedName = folderName.trim();
+    if (!trimmedName) {
+      window.alert(t("emptyNewFolderName"));
+      return null;
+    }
+    const result = await createWorkspaceFolder(rootPath, trimmedName);
+    if (!result?.ok || !result.path) {
+      window.alert(result?.error || t("failedCreateWorkspace"));
+      return null;
+    }
+    workspaceFolderLookupCache.clear();
+    return result;
+  }
+
+  async function openWorkspaceManager({ roots = [], rootPath = "", folderPath = "" } = {}) {
+    if (document.getElementById("wb-bridge-workspace-manager-overlay")) {
+      return null;
+    }
+
+    return new Promise((resolve, reject) => {
+      let selectedRootPath = rootPath || roots[0]?.path || "";
+      let selectedFolderPath = folderPath || "";
+      let folders = [];
+      let filteredFolders = [];
+      let loading = false;
+
+      const overlay = document.createElement("div");
+      overlay.id = "wb-bridge-workspace-manager-overlay";
+      overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:24px;";
+      const panel = document.createElement("div");
+      panel.style.cssText = "width:min(820px,100%);max-height:min(760px,calc(100vh - 48px));overflow:hidden;border-radius:16px;background:#151823;color:#eef2ff;box-shadow:0 24px 64px rgba(0,0,0,.42);display:flex;flex-direction:column;font:14px/1.45 'Segoe UI',sans-serif;";
+      overlay.appendChild(panel);
+
+      const title = document.createElement("div");
+      title.textContent = t("manageWorkspacesTitle");
+      title.style.cssText = "padding:20px 24px 8px;font-size:20px;font-weight:700;";
+      panel.appendChild(title);
+
+      const body = document.createElement("div");
+      body.style.cssText = "padding:0 24px 20px;display:flex;flex-direction:column;gap:14px;overflow:auto;";
+      panel.appendChild(body);
+
+      const topRow = document.createElement("div");
+      topRow.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;";
+      body.appendChild(topRow);
+
+      const rootField = document.createElement("label");
+      rootField.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+      topRow.appendChild(rootField);
+      const rootLabel = document.createElement("span");
+      rootLabel.textContent = t("drive");
+      rootLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      rootField.appendChild(rootLabel);
+      const rootSelect = document.createElement("select");
+      rootSelect.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;";
+      rootField.appendChild(rootSelect);
+      for (const root of roots) {
+        const option = document.createElement("option");
+        option.value = root.path;
+        option.textContent = root.label || root.path;
+        rootSelect.appendChild(option);
+      }
+      rootSelect.value = selectedRootPath;
+
+      const createButton = document.createElement("button");
+      createButton.type = "button";
+      createButton.textContent = t("newWorkspace");
+      createButton.style.cssText = "height:40px;padding:0 16px;border:none;border-radius:10px;background:#6ea8fe;color:#09111f;font-weight:700;cursor:pointer;";
+      topRow.appendChild(createButton);
+
+      const searchField = document.createElement("label");
+      searchField.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+      body.appendChild(searchField);
+      const searchLabel = document.createElement("span");
+      searchLabel.textContent = t("searchWorkspaces");
+      searchLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      searchField.appendChild(searchLabel);
+      const searchInput = document.createElement("input");
+      searchInput.type = "search";
+      searchInput.placeholder = t("searchWorkspacePlaceholder");
+      searchInput.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;outline:none;";
+      searchField.appendChild(searchInput);
+
+      const listWrapper = document.createElement("div");
+      listWrapper.style.cssText = "min-height:320px;max-height:420px;overflow:auto;border:1px solid #2c3350;border-radius:12px;background:#0d1120;padding:8px;display:flex;flex-direction:column;gap:8px;";
+      body.appendChild(listWrapper);
+      const emptyState = document.createElement("div");
+      emptyState.style.cssText = "padding:36px 12px;text-align:center;color:#7d89b4;font-size:13px;";
+
+      const footer = document.createElement("div");
+      footer.style.cssText = "padding:16px 24px 24px;display:flex;justify-content:flex-end;border-top:1px solid #232a42;";
+      panel.appendChild(footer);
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.textContent = t("close");
+      closeButton.style.cssText = "height:40px;padding:0 16px;border:1px solid #39415d;border-radius:10px;background:#101528;color:#d9e0ff;cursor:pointer;";
+      footer.appendChild(closeButton);
+
+      const cleanup = () => {
+        document.removeEventListener("keydown", onKeyDown, true);
+        overlay.remove();
+      };
+      const finish = () => {
+        cleanup();
+        resolve({ rootPath: selectedRootPath, folderPath: selectedFolderPath });
+      };
+      const fail = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const getFilteredFolders = () => {
+        const keyword = searchInput.value.trim().toLowerCase();
+        return keyword
+          ? folders.filter((folder) => folder.name.toLowerCase().includes(keyword))
+          : [...folders];
+      };
+      const setBusy = () => {
+        rootSelect.disabled = loading;
+        searchInput.disabled = loading;
+        createButton.disabled = loading || !selectedRootPath;
+        createButton.style.opacity = createButton.disabled ? ".55" : "1";
+      };
+      const renderList = () => {
+        filteredFolders = getFilteredFolders();
+        listWrapper.replaceChildren();
+        if (!selectedRootPath) {
+          emptyState.textContent = t("selectDriveFirst");
+          listWrapper.appendChild(emptyState);
+          return;
+        }
+        if (loading) {
+          emptyState.textContent = t("scanningWorkspaceRoot");
+          listWrapper.appendChild(emptyState);
+          return;
+        }
+        if (filteredFolders.length === 0) {
+          emptyState.textContent = folders.length === 0 ? t("noWorkspaceOnDrive") : t("noMatchingWorkspace");
+          listWrapper.appendChild(emptyState);
+          return;
+        }
+        for (const folder of filteredFolders) {
+          const row = document.createElement("div");
+          row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 14px;border:1px solid " + (folder.path === selectedFolderPath ? "#6ea8fe" : "#2b3453") + ";border-radius:10px;background:" + (folder.path === selectedFolderPath ? "#18253d" : "#12182b") + ";";
+          const meta = document.createElement("button");
+          meta.type = "button";
+          meta.style.cssText = "display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0;border:none;background:transparent;color:#eef2ff;text-align:left;cursor:pointer;padding:0;";
+          row.appendChild(meta);
+          const name = document.createElement("span");
+          name.textContent = folder.name;
+          name.style.cssText = "display:block;font-weight:700;font-size:15px;line-height:1.35;";
+          meta.appendChild(name);
+          const folderPath = document.createElement("span");
+          folderPath.textContent = folder.path;
+          folderPath.style.cssText = "display:block;font-size:12px;line-height:1.45;color:#9aa4c7;word-break:break-all;";
+          meta.appendChild(folderPath);
+          meta.addEventListener("click", () => {
+            selectedFolderPath = folder.path;
+            renderList();
+          });
+          const actions = document.createElement("div");
+          actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+          row.appendChild(actions);
+          const renameButton = document.createElement("button");
+          renameButton.type = "button";
+          renameButton.textContent = t("renameWorkspace");
+          renameButton.style.cssText = "height:34px;padding:0 12px;border:1px solid #39415d;border-radius:8px;background:#101528;color:#d9e0ff;font-weight:700;cursor:pointer;";
+          renameButton.addEventListener("click", async () => {
+            const nextName = await promptTextInput(t("renameWorkspaceTitle"), t("workspaceName"), folder.name);
+            if (nextName === null) {
+              return;
+            }
+            const trimmedName = nextName.trim();
+            if (!trimmedName) {
+              window.alert(t("emptyNewFolderName"));
+              return;
+            }
+            const result = await renameWorkspaceFolder(folder.path, trimmedName);
+            if (!result?.ok || !result.path) {
+              window.alert(result?.error || t("failedRenameWorkspace"));
+              return;
+            }
+            workspaceFolderLookupCache.clear();
+            selectedFolderPath = folder.path === selectedFolderPath ? result.path : selectedFolderPath;
+            await loadFolders(selectedRootPath, selectedFolderPath);
+          });
+          actions.appendChild(renameButton);
+          const deleteButton = document.createElement("button");
+          deleteButton.type = "button";
+          deleteButton.textContent = t("delete");
+          deleteButton.style.cssText = "height:34px;padding:0 12px;border:none;border-radius:8px;background:#f87171;color:#200a0a;font-weight:700;cursor:pointer;";
+          deleteButton.addEventListener("click", async () => {
+            const confirmed = await confirmDestructiveAction(
+              t("deleteWorkspaceTitle"),
+              t("deleteWorkspaceDescription", { name: folder.name })
+            );
+            if (!confirmed) {
+              return;
+            }
+            const result = await deleteWorkspaceFolder(folder.path);
+            if (!result?.ok) {
+              window.alert(result?.error || t("failedDeleteWorkspace"));
+              return;
+            }
+            workspaceFolderLookupCache.clear();
+            selectedFolderPath = folder.path === selectedFolderPath ? "" : selectedFolderPath;
+            await loadFolders(selectedRootPath, selectedFolderPath);
+          });
+          actions.appendChild(deleteButton);
+          listWrapper.appendChild(row);
+        }
+      };
+      const loadFolders = async (nextRootPath, preferredFolderPath = "") => {
+        selectedRootPath = nextRootPath || "";
+        rootSelect.value = selectedRootPath;
+        loading = true;
+        folders = [];
+        renderList();
+        setBusy();
+        try {
+          if (!selectedRootPath) {
+            return;
+          }
+          const payload = await fetchWorkspaceFolders(selectedRootPath);
+          folders = payload?.folders || [];
+          selectedFolderPath = preferredFolderPath && folders.some((folder) => folder.path === preferredFolderPath) ? preferredFolderPath : "";
+        } finally {
+          loading = false;
+          renderList();
+          setBusy();
+        }
+      };
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish();
+        }
+      };
+
+      rootSelect.addEventListener("change", () => loadFolders(rootSelect.value, "").catch(fail));
+      searchInput.addEventListener("input", renderList);
+      createButton.addEventListener("click", async () => {
+        try {
+          const result = await promptAndCreateWorkspace(selectedRootPath);
+          if (result?.path) {
+            await loadFolders(selectedRootPath, result.path);
+          }
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : String(error));
+        }
+      });
+      closeButton.addEventListener("click", finish);
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) {
+          finish();
+        }
+      });
+      document.addEventListener("keydown", onKeyDown, true);
+      document.body.appendChild(overlay);
+      renderList();
+      setBusy();
+      loadFolders(selectedRootPath, selectedFolderPath).catch(fail);
+    });
+  }
+
   async function openWorkspaceFileManager(options = {}) {
     if (document.getElementById("wb-bridge-file-manager-overlay")) {
       return;
@@ -1182,7 +1543,7 @@ function renderWorkBuddyNativeShimJs({
       panel.appendChild(body);
 
       const topRow = document.createElement("div");
-      topRow.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:12px;align-items:end;";
+      topRow.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto auto;gap:12px;align-items:end;";
       body.appendChild(topRow);
 
       const rootField = document.createElement("label");
@@ -1226,10 +1587,29 @@ function renderWorkBuddyNativeShimJs({
       refreshButton.style.cssText = "height:40px;padding:0 16px;border:1px solid #39415d;border-radius:10px;background:#101528;color:#d9e0ff;cursor:pointer;";
       topRow.appendChild(refreshButton);
 
+      const manageWorkspacesButton = document.createElement("button");
+      manageWorkspacesButton.type = "button";
+      manageWorkspacesButton.textContent = t("manageWorkspaces");
+      manageWorkspacesButton.style.cssText = "height:40px;padding:0 16px;border:1px solid #39415d;border-radius:10px;background:#101528;color:#d9e0ff;cursor:pointer;";
+      topRow.appendChild(manageWorkspacesButton);
+
       const workspaceHint = document.createElement("div");
       workspaceHint.style.cssText = "font-size:12px;color:#7d89b4;";
       workspaceHint.textContent = t("workspaceActionHint");
       body.appendChild(workspaceHint);
+
+      const workspaceSearchField = document.createElement("label");
+      workspaceSearchField.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+      body.appendChild(workspaceSearchField);
+      const workspaceSearchLabel = document.createElement("span");
+      workspaceSearchLabel.textContent = t("searchWorkspaces");
+      workspaceSearchLabel.style.cssText = "font-size:12px;color:#9aa4c7;";
+      workspaceSearchField.appendChild(workspaceSearchLabel);
+      const workspaceSearchInput = document.createElement("input");
+      workspaceSearchInput.type = "search";
+      workspaceSearchInput.placeholder = t("searchWorkspacePlaceholder");
+      workspaceSearchInput.style.cssText = "height:40px;border:1px solid #39415d;border-radius:10px;background:#0f1320;color:#eef2ff;padding:0 12px;outline:none;";
+      workspaceSearchField.appendChild(workspaceSearchInput);
 
       const uploadRow = document.createElement("div");
       uploadRow.style.cssText = "display:block;";
@@ -1286,13 +1666,20 @@ function renderWorkBuddyNativeShimJs({
         reject(error);
       };
 
+      const getFilteredWorkspaceFolders = () => {
+        const keyword = workspaceSearchInput.value.trim().toLowerCase();
+        return keyword
+          ? folders.filter((folder) => folder.name.toLowerCase().includes(keyword))
+          : [...folders];
+      };
+
       const renderWorkspaceOptions = () => {
         workspaceSelect.replaceChildren();
         const placeholder = document.createElement("option");
         placeholder.value = "";
         placeholder.textContent = loadingFolders ? t("loadingFiles") : t("selectWorkspace");
         workspaceSelect.appendChild(placeholder);
-        for (const folder of folders) {
+        for (const folder of getFilteredWorkspaceFolders()) {
           const option = document.createElement("option");
           option.value = folder.path;
           option.textContent = folder.name;
@@ -1376,9 +1763,12 @@ function renderWorkBuddyNativeShimJs({
       const setBusy = () => {
         rootSelect.disabled = loadingFolders || loadingFiles;
         workspaceSelect.disabled = loadingFolders || loadingFiles;
+        workspaceSearchInput.disabled = loadingFolders || loadingFiles;
         refreshButton.disabled = loadingFolders || loadingFiles || !selectedRoot;
+        manageWorkspacesButton.disabled = loadingFolders || loadingFiles || roots.length === 0;
         uploadInput.disabled = loadingFolders || loadingFiles || !selectedWorkspacePath;
         dropZone.disabled = loadingFolders || loadingFiles || !selectedWorkspacePath;
+        manageWorkspacesButton.style.opacity = manageWorkspacesButton.disabled ? ".55" : "1";
         dropZone.style.opacity = dropZone.disabled ? ".55" : "1";
       };
 
@@ -1499,27 +1889,15 @@ function renderWorkBuddyNativeShimJs({
       });
       workspaceSelect.addEventListener("change", async () => {
         if (workspaceSelect.value === "__create_workspace__") {
-          const folderName = window.prompt(t("promptNewFolderName"), "");
-          if (folderName === null) {
-            renderWorkspaceOptions();
-            return;
-          }
-          const trimmedName = folderName.trim();
-          if (!trimmedName) {
-            window.alert(t("emptyNewFolderName"));
-            renderWorkspaceOptions();
-            return;
-          }
           try {
-            const result = await createWorkspaceFolder(selectedRoot, trimmedName);
-            if (!result?.ok || !result.path) {
-              window.alert(result?.error || t("failedCreateWorkspace"));
-              renderWorkspaceOptions();
-              return;
+            const result = await promptAndCreateWorkspace(selectedRoot);
+            if (result?.path) {
+              await loadFoldersForRoot(selectedRoot, result.path);
             }
-            await loadFoldersForRoot(selectedRoot, result.path);
           } catch (error) {
             window.alert(error instanceof Error ? error.message : String(error));
+          } finally {
+            renderWorkspaceOptions();
           }
           return;
         }
@@ -1528,6 +1906,21 @@ function renderWorkBuddyNativeShimJs({
       refreshButton.addEventListener("click", () => {
         loadFoldersForRoot(rootSelect.value, selectedWorkspacePath).catch(fail);
       });
+      manageWorkspacesButton.addEventListener("click", async () => {
+        try {
+          const result = await openWorkspaceManager({
+            roots,
+            rootPath: selectedRoot || rootSelect.value,
+            folderPath: selectedWorkspacePath,
+          });
+          if (result?.rootPath) {
+            await loadFoldersForRoot(result.rootPath, result.folderPath);
+          }
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : String(error));
+        }
+      });
+      workspaceSearchInput.addEventListener("input", renderWorkspaceOptions);
       uploadInput.addEventListener("change", () => {
         updateQueuedUploadFiles(uploadInput.files || []);
         uploadQueuedFiles();
