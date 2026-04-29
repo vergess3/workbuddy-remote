@@ -2757,9 +2757,7 @@ function renderWorkBuddyNativeShimJs({
       if (Date.now() - mobileNavigationAssist.lastActivationAt < 750) {
         return;
       }
-      const rememberedState = getRememberedMobileSidebarState(45000);
-      const open = rememberedState === null ? isLikelyMobileSidebarOpen() : rememberedState;
-      activateMobileNavigation(!open);
+      activateMobileNavigation(true);
     };
     hitTarget.addEventListener("pointerdown", activate, true);
     hitTarget.addEventListener("pointerup", activate, true);
@@ -2823,8 +2821,8 @@ function renderWorkBuddyNativeShimJs({
 
   function getMobileNavigationHitBand() {
     const width = 76;
-    const height = 96;
-    const top = Math.max(0, Math.min(44, window.innerHeight - height));
+    const height = 64;
+    const top = Math.max(0, Math.min(96, window.innerHeight - height));
     return {
       left: 0,
       right: width,
