@@ -2287,16 +2287,16 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function getDirectControlText(control) {
-    return String(control?.textContent || "").replace(/\s+/g, " ").trim();
+    return String(control?.textContent || "").replace(/\\s+/g, " ").trim();
   }
 
   function isTopApplicationMenuControl(control) {
     const text = getDirectControlText(control);
     const label = getControlLabel(control);
-    if (/^(?:workbuddy|edit(?:\([a-z]\))?|window(?:\([a-z]\))?|help(?:\([a-z]\))?|编辑(?:\([a-z]\))?|窗口(?:\([a-z]\))?|帮助(?:\([a-z]\))?)$/iu.test(text)) {
+    if (/^(?:workbuddy|edit(?:\\([a-z]\\))?|window(?:\\([a-z]\\))?|help(?:\\([a-z]\\))?|编辑(?:\\([a-z]\\))?|窗口(?:\\([a-z]\\))?|帮助(?:\\([a-z]\\))?)$/iu.test(text)) {
       return true;
     }
-    return /^(?:workbuddy|edit|window|help|编辑|窗口|帮助)(?:\s|\(|$)/iu.test(label.trim());
+    return /^(?:workbuddy|edit|window|help|编辑|窗口|帮助)(?:\\s|\\(|$)/iu.test(label.trim());
   }
 
   function getTopApplicationMenuBottom() {
@@ -2315,7 +2315,10 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function getMobileMenuSearchBounds() {
-    const minY = Math.min(180, Math.max(40, getTopApplicationMenuBottom() + 4));
+    const minY = Math.min(
+      220,
+      Math.max(76, window.innerHeight * 0.085, getTopApplicationMenuBottom() + 4)
+    );
     return {
       x: Math.min(156, Math.max(104, window.innerWidth * 0.22)),
       minY,
@@ -2354,7 +2357,7 @@ function renderWorkBuddyNativeShimJs({
     const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
     const isCompact = rect.width <= 88 && rect.height <= 88;
     const isSquareish = Math.abs(rect.width - rect.height) <= Math.max(16, Math.min(rect.width, rect.height) * 0.65);
-    const longText = text.replace(/\s+/g, "").length > 4;
+    const longText = text.replace(/\\s+/g, "").length > 4;
     if (longText && !hasSvg && !hasMenuLabel && !hasMenuGlyph) {
       return -1;
     }
@@ -2679,12 +2682,19 @@ function renderWorkBuddyNativeShimJs({
     const size = Math.max(52, Math.min(72, Math.max(rect.width, rect.height) + 28));
     const left = Math.max(0, Math.min(rect.left - Math.max(10, (size - rect.width) / 2), window.innerWidth - size));
     const top = Math.max(0, Math.min(rect.top - Math.max(12, (size - rect.height) / 2), window.innerHeight - size));
-    hitTarget.style.left = left + "px";
-    hitTarget.style.top = top + "px";
-    hitTarget.style.width = size + "px";
-    hitTarget.style.height = size + "px";
-    hitTarget.style.display = "block";
-    hitTarget.style.pointerEvents = "auto";
+    const nextStyle = {
+      left: left + "px",
+      top: top + "px",
+      width: size + "px",
+      height: size + "px",
+      display: "block",
+      pointerEvents: "auto",
+    };
+    for (const [name, value] of Object.entries(nextStyle)) {
+      if (hitTarget.style[name] !== value) {
+        hitTarget.style[name] = value;
+      }
+    }
   }
 
   function scheduleMobileNavigationRefresh() {
@@ -2813,7 +2823,7 @@ function renderWorkBuddyNativeShimJs({
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["aria-expanded", "aria-pressed", "data-state", "data-open", "style", "class"],
+      attributeFilter: ["aria-expanded", "aria-pressed", "data-state", "data-open"],
     });
     for (const delayMs of [100, 300, 800, 1600, 3000]) {
       setTimeout(scheduleMobileNavigationRefresh, delayMs);
