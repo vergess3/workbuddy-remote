@@ -53,6 +53,7 @@ function renderWorkBuddyNativeShimJs({
   locale = "",
   enableFileManager = true,
   enableRestart = true,
+  maskBridgeModelSecrets = false,
 } = {}) {
   const methodList = [...new Set([...FALLBACK_BUDDY_API_METHODS, ...methods])];
   return `(() => {
@@ -61,6 +62,7 @@ function renderWorkBuddyNativeShimJs({
   const workBuddyLocale = ${JSON.stringify(locale || "")};
   const fileManagerEnabled = ${JSON.stringify(enableFileManager !== false)};
   const restartEnabled = ${JSON.stringify(enableRestart !== false)};
+  const maskBridgeModelSecrets = ${JSON.stringify(maskBridgeModelSecrets === true)};
   const pending = new Map();
   const listeners = new Map();
   let socket = null;
@@ -225,6 +227,99 @@ function renderWorkBuddyNativeShimJs({
   function t(key, values = {}) {
     const template = messages[getUiLanguage()]?.[key] || messages.zhCN[key] || key;
     return String(template).replace(/\\{(\\w+)\\}/g, (_match, name) => values?.[name] ?? "");
+  }
+
+  const sensitiveFieldLabels = {
+    apiKey: ["API KEY", "APIKEY", "API KEY:", "API KEY：", "API 密钥", "密钥"],
+    endpoint: ["接口地址", "API 地址", "BASE URL", "BASEURL", "ENDPOINT", "API URL"],
+  };
+
+  function normalizeLabelText(value) {
+    return String(value || "")
+      .replace(/\\s+/g, " ")
+      .trim()
+      .replace(/[：:*]+$/u, "")
+      .trim()
+      .toUpperCase();
+  }
+
+  function getFieldTypeFromLabel(value) {
+    const normalized = normalizeLabelText(value);
+    for (const [fieldType, labels] of Object.entries(sensitiveFieldLabels)) {
+      if (labels.includes(normalized)) {
+        return fieldType;
+      }
+    }
+    return null;
+  }
+
+  function findSensitiveFieldContainer(labelElement) {
+    let current = labelElement;
+    for (let depth = 0; current && depth < 6; depth += 1) {
+      const parent = current.parentElement;
+      if (!parent || parent === document.body) {
+        break;
+      }
+
+      if (parent.querySelectorAll("input:not([type='hidden']), textarea").length > 0) {
+        return parent;
+      }
+      current = parent;
+    }
+    return null;
+  }
+
+  function hideSensitiveFieldRevealControls(fieldContainer) {
+    if (!fieldContainer) {
+      return;
+    }
+
+    for (const button of fieldContainer.querySelectorAll("button")) {
+      if (normalizeLabelText(button.textContent)) {
+        continue;
+      }
+      if (button.dataset.wbSensitiveButtonMasked === "true") {
+        continue;
+      }
+      button.dataset.wbSensitiveButtonMasked = "true";
+      button.style.display = "none";
+    }
+  }
+
+  function maskSensitiveInput(input, fieldType) {
+    if (!input || input.dataset.wbSensitiveMasked === "true") {
+      return;
+    }
+
+    input.dataset.wbSensitiveMasked = "true";
+    input.dataset.wbSensitiveType = fieldType;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.style.webkitTextSecurity = "disc";
+  }
+
+  function maskSensitiveModelFields() {
+    if (!maskBridgeModelSecrets) {
+      return;
+    }
+
+    for (const element of document.querySelectorAll("label, span, div, p")) {
+      const fieldType = getFieldTypeFromLabel(element.textContent);
+      if (!fieldType) {
+        continue;
+      }
+
+      const fieldContainer = findSensitiveFieldContainer(element);
+      const input = fieldContainer?.querySelector("input:not([type='hidden']), textarea");
+      if (!input) {
+        continue;
+      }
+
+      maskSensitiveInput(input, fieldType);
+      if (fieldType === "apiKey") {
+        hideSensitiveFieldRevealControls(fieldContainer);
+      }
+    }
   }
 
   function formatFileSize(bytes) {
@@ -2362,9 +2457,42 @@ function renderWorkBuddyNativeShimJs({
     ensureRestartButton();
   }
 
+  let sensitiveFieldMaskObserver = null;
+  let sensitiveFieldMaskScheduled = false;
+
+  function runSensitiveFieldMaskScheduled() {
+    sensitiveFieldMaskScheduled = false;
+    maskSensitiveModelFields();
+  }
+
+  function scheduleSensitiveFieldMask() {
+    if (!maskBridgeModelSecrets || sensitiveFieldMaskScheduled) {
+      return;
+    }
+    sensitiveFieldMaskScheduled = true;
+    queueMicrotask(runSensitiveFieldMaskScheduled);
+  }
+
+  function installSensitiveFieldMasker() {
+    if (!maskBridgeModelSecrets || sensitiveFieldMaskObserver || !document.documentElement) {
+      return;
+    }
+    maskSensitiveModelFields();
+    sensitiveFieldMaskObserver = new MutationObserver(scheduleSensitiveFieldMask);
+    sensitiveFieldMaskObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "title", "style", "class", "value"],
+    });
+  }
+
+  installSensitiveFieldMasker();
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
       installWindowControlHider();
+      installSensitiveFieldMasker();
       installWorkspaceHintTracker();
       installDomCommandInterceptors();
       initializeRemoteControls().catch((error) => {
@@ -2373,6 +2501,7 @@ function renderWorkBuddyNativeShimJs({
     }, { once: true });
   } else {
     installWindowControlHider();
+    installSensitiveFieldMasker();
     installWorkspaceHintTracker();
     installDomCommandInterceptors();
     initializeRemoteControls().catch((error) => {

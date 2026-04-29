@@ -44,4 +44,23 @@ powershell -ExecutionPolicy Bypass -File .\tools\start-workbuddy-remote.ps1 -Lis
 
 Remote listening requires a password hash.
 
+## Config
+
+`workbuddy-remote.config.json`:
+
+```json
+{
+  "workbuddyExePath": "",
+  "workbuddyUserDataDir": "",
+  "runtimeRootDir": "output/runtime",
+  "cdpPort": 9333,
+  "bridgePort": 8780,
+  "listenHost": "127.0.0.1",
+  "killWorkBuddyProcessesBeforeStart": false,
+  "maskBridgeModelSecrets": true
+}
+```
+
+When `maskBridgeModelSecrets` is `true`, the bridge redacts model API address / Base URL and API Key values on the server before returning config data to the browser, and the page also masks those inputs visually.
+
 Refreshing the web page only recreates the browser WebSocket. It does not create a new WorkBuddy process, and socket cleanup releases event subscriptions for the closed page.

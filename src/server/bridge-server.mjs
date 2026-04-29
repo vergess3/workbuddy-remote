@@ -21,7 +21,7 @@ import {
   renderWorkBuddyNativeShimJs,
 } from "../web/workbuddy-native.mjs";
 import { createBridgeAccessAuth } from "./access-auth.mjs";
-import { loadConfig } from "../config.mjs";
+import { loadBridgeUiConfig, loadConfig } from "../config.mjs";
 import {
   createWorkspaceFolder,
   deleteWorkspaceFolder,
@@ -42,6 +42,19 @@ const MAX_COMPRESSED_STATIC_ASSET_BYTES = 32 * 1024 * 1024;
 const versionedScriptCompressionCache = new Map();
 const WORKBUDDY_ASAR_PATH = resolveWorkBuddyAsarPath();
 const workBuddyAsar = new AsarArchive(WORKBUDDY_ASAR_PATH);
+const MODEL_SECRET_READ_METHODS = new Set([
+  "configGet",
+  "configGetAll",
+  "configGetLocalCustomModels",
+  "configSaveLocalCustomModel",
+  "configDeleteLocalCustomModel",
+]);
+const MODEL_SECRET_WRITE_METHODS = new Set([
+  "configSet",
+  "configSaveLocalCustomModel",
+]);
+const REDACTED_MODEL_API_KEY = "workbuddy-remote-redacted-api-key";
+const REDACTED_MODEL_ENDPOINT = "https://workbuddy-remote.local/redacted/chat/completions";
 
 async function loadFeatureFlags() {
   const config = await loadConfig();
@@ -57,6 +70,176 @@ async function isFileManagerEnabled() {
 
 async function isRestartEnabled() {
   return (await loadFeatureFlags()).enableRestart;
+}
+
+function normalizeSecretFieldName(name) {
+  return String(name || "").replace(/[\s_-]/g, "").toLowerCase();
+}
+
+function getModelSecretFieldType(name) {
+  const normalized = normalizeSecretFieldName(name);
+  if (
+    normalized === "apikey" ||
+    normalized === "secretkey" ||
+    normalized.endsWith(".apikey") ||
+    normalized.endsWith(".secretkey")
+  ) {
+    return "apiKey";
+  }
+  if (
+    normalized === "endpoint" ||
+    normalized === "baseurl" ||
+    normalized === "apiurl" ||
+    normalized.endsWith(".endpoint") ||
+    normalized.endsWith(".baseurl") ||
+    normalized.endsWith(".apiurl")
+  ) {
+    return "endpoint";
+  }
+  return "";
+}
+
+function isRedactedModelSecretValue(value) {
+  return value === REDACTED_MODEL_API_KEY || value === REDACTED_MODEL_ENDPOINT;
+}
+
+function getModelSecretPlaceholder(fieldType) {
+  return fieldType === "endpoint" ? REDACTED_MODEL_ENDPOINT : REDACTED_MODEL_API_KEY;
+}
+
+function getModelSecretIdentity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+
+  const parts = [];
+  for (const key of ["id", "modelId", "providerId", "name"]) {
+    const item = value[key];
+    if (typeof item === "string" && item.trim()) {
+      parts.push(`${key}:${item.trim()}`);
+    }
+  }
+  return parts.length > 0 ? parts.join("|") : "";
+}
+
+function createModelSecretProtector() {
+  const valuesByPath = new Map();
+  const valuesByIdentity = new Map();
+
+  function remember(pathKey, identity, fieldName, value) {
+    valuesByPath.set(pathKey, value);
+    if (!identity) {
+      return;
+    }
+    const current = valuesByIdentity.get(identity) || {};
+    current[fieldName] = value;
+    valuesByIdentity.set(identity, current);
+  }
+
+  function findCached(pathKey, identity, fieldName) {
+    if (identity) {
+      const current = valuesByIdentity.get(identity);
+      if (current && Object.prototype.hasOwnProperty.call(current, fieldName)) {
+        return current[fieldName];
+      }
+    }
+    if (valuesByPath.has(pathKey)) {
+      return valuesByPath.get(pathKey);
+    }
+    return undefined;
+  }
+
+  function protect(value, path = []) {
+    if (Array.isArray(value)) {
+      return value.map((item, index) => protect(item, [...path, String(index)]));
+    }
+
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    const identity = getModelSecretIdentity(value);
+    const result = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const fieldType = getModelSecretFieldType(key);
+      const pathKey = [...path, key].join(".");
+      if (fieldType && typeof nestedValue === "string" && nestedValue) {
+        remember(pathKey, identity, key, nestedValue);
+        result[key] = getModelSecretPlaceholder(fieldType);
+      } else {
+        result[key] = protect(nestedValue, [...path, key]);
+      }
+    }
+    return result;
+  }
+
+  function restore(value, path = []) {
+    if (Array.isArray(value)) {
+      return value.map((item, index) => restore(item, [...path, String(index)]));
+    }
+
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    const identity = getModelSecretIdentity(value);
+    const result = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const fieldType = getModelSecretFieldType(key);
+      const pathKey = [...path, key].join(".");
+      if (fieldType && isRedactedModelSecretValue(nestedValue)) {
+        const cached = findCached(pathKey, identity, key);
+        if (cached === undefined) {
+          throw new Error("A redacted model secret could not be restored. Re-enter it before saving.");
+        }
+        result[key] = cached;
+      } else {
+        result[key] = restore(nestedValue, [...path, key]);
+      }
+    }
+    return result;
+  }
+
+  function protectConfigGetResult(args, result) {
+    const configKey = typeof args?.[0] === "string" ? args[0] : "";
+    const fieldType = getModelSecretFieldType(configKey);
+    if (fieldType && typeof result === "string" && result) {
+      remember(`config.${configKey}`, "", configKey, result);
+      return getModelSecretPlaceholder(fieldType);
+    }
+    return protect(result);
+  }
+
+  function restoreConfigSetArgs(args) {
+    if (
+      Array.isArray(args) &&
+      typeof args[0] === "string" &&
+      getModelSecretFieldType(args[0]) &&
+      isRedactedModelSecretValue(args[1])
+    ) {
+      const cached = findCached(`config.${args[0]}`, "", args[0]);
+      if (cached === undefined) {
+        throw new Error("A redacted model secret could not be restored. Re-enter it before saving.");
+      }
+      return [args[0], cached, ...args.slice(2)];
+    }
+    return restore(args);
+  }
+
+  return {
+    protectResult(method, args, result) {
+      if (!MODEL_SECRET_READ_METHODS.has(method)) {
+        return result;
+      }
+      return method === "configGet" ? protectConfigGetResult(args, result) : protect(result);
+    },
+    restoreArgs(method, args) {
+      if (!MODEL_SECRET_WRITE_METHODS.has(method)) {
+        return args;
+      }
+      return method === "configSet" ? restoreConfigSetArgs(args) : restore(args);
+    },
+  };
 }
 
 function writeFeatureDisabled(res, featureName) {
@@ -486,19 +669,26 @@ function createRequestHandler(runtime, auth) {
       }
 
       if (requestUrl.pathname === "/bridge/workbuddy-native-shim.js") {
-        const [methods, version, locale, features] = await Promise.all([
+        const [methods, version, locale, features, bridgeUiConfig] = await Promise.all([
           runtime.getBuddyApiMethods(),
           runtime.getWorkBuddyVersion(),
           runtime.getWorkBuddyLocale(),
           loadFeatureFlags(),
+          loadBridgeUiConfig(),
         ]);
-        const shim = renderWorkBuddyNativeShimJs({ methods, version, locale, ...features });
+        const shim = renderWorkBuddyNativeShimJs({
+          methods,
+          version,
+          locale,
+          ...features,
+          ...bridgeUiConfig,
+        });
         sendVersionedScript(
           req,
           res,
           shim,
           {
-            etag: `"workbuddy-native-shim-${version || "unknown"}-${locale || "unknown"}-${methods.length}-${shim.length}-${features.enableFileManager ? "files-on" : "files-off"}-${features.enableRestart ? "restart-on" : "restart-off"}"`,
+            etag: `"workbuddy-native-shim-${version || "unknown"}-${locale || "unknown"}-${methods.length}-${shim.length}-${features.enableFileManager ? "files-on" : "files-off"}-${features.enableRestart ? "restart-on" : "restart-off"}-${bridgeUiConfig.maskBridgeModelSecrets ? "secrets-masked" : "secrets-visible"}"`,
             cacheControl: REVALIDATED_STATIC_CACHE_CONTROL,
           }
         );
@@ -552,6 +742,7 @@ function createRequestHandler(runtime, auth) {
 
 function attachWebSocketServer(server, runtime, auth) {
   const wss = new WebSocketServer({ noServer: true });
+  const modelSecretProtector = createModelSecretProtector();
 
   wss.on("connection", (socket) => {
     logger.info("websocket.connection", "Browser WebSocket connected", {
@@ -592,7 +783,15 @@ function attachWebSocketServer(server, runtime, auth) {
 
       try {
         if (message.type === "buddy-api-call") {
-          const result = await runtime.invokeBuddyApi(message.method, message.args || []);
+          const bridgeUiConfig = await loadBridgeUiConfig();
+          const shouldProtectModelSecrets = bridgeUiConfig.maskBridgeModelSecrets === true;
+          const args = shouldProtectModelSecrets
+            ? modelSecretProtector.restoreArgs(message.method, message.args || [])
+            : message.args || [];
+          const rawResult = await runtime.invokeBuddyApi(message.method, args);
+          const result = shouldProtectModelSecrets
+            ? modelSecretProtector.protectResult(message.method, args, rawResult)
+            : rawResult;
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,

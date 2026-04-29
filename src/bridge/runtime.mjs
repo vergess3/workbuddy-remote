@@ -83,6 +83,12 @@ function unwrapTransportPayload(payload) {
   return null;
 }
 
+function summarizeBuddyApiPayload(method, value) {
+  return String(method || "").startsWith("config")
+    ? "[redacted config payload]"
+    : summarizeValue(value);
+}
+
 function readTimestampMs(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 0 && value < 10_000_000_000 ? value * 1000 : value;
@@ -840,7 +846,7 @@ class BridgeRuntime {
   async invokeBuddyApi(method, args) {
     logger.debug("buddy_api.invoke", "Invoking WorkBuddy buddyAPI method", {
       method,
-      args: summarizeValue(args),
+      args: summarizeBuddyApiPayload(method, args),
     });
     const expression = `globalThis.__workbuddyBridge.callBuddyApi(${JSON.stringify(
       method
@@ -849,7 +855,7 @@ class BridgeRuntime {
       const result = await this.withCdpRecovery(() => this.cdp.evaluate(expression));
       logger.debug("buddy_api.invoke.result", "WorkBuddy buddyAPI invoke completed", {
         method,
-        result: summarizeValue(result),
+        result: summarizeBuddyApiPayload(method, result),
       });
       return unwrapTransportPayload(result);
     } catch (error) {
@@ -857,16 +863,16 @@ class BridgeRuntime {
       if (fallback.handled) {
         logger.debug("buddy_api.invoke.fallback", "Returned fallback for missing WorkBuddy buddyAPI handler", {
           method,
-          args: summarizeValue(args),
+          args: summarizeBuddyApiPayload(method, args),
           error,
-          result: summarizeValue(fallback.value),
+          result: summarizeBuddyApiPayload(method, fallback.value),
         });
         return fallback.value;
       }
 
       logger.error("buddy_api.invoke.error", "WorkBuddy buddyAPI invoke failed", {
         method,
-        args: summarizeValue(args),
+        args: summarizeBuddyApiPayload(method, args),
         error,
       });
       throw error;
