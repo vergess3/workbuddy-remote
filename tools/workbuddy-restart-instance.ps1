@@ -33,6 +33,9 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $startupScript = Join-Path $scriptDir "start-workbuddy-remote.ps1"
+if (-not (Test-Path -LiteralPath $startupScript)) {
+    throw "Startup script not found: $startupScript"
+}
 
 function Write-BridgeRestartLog {
     param(
@@ -142,7 +145,14 @@ function Stop-WorkBuddyInstance {
         [int]$Port
     )
 
-    $targetPid = $ProcessId
+    $targetPid = 0
+    if ($ProcessId -gt 0) {
+        $processName = Get-ProcessNameSafe -ProcessId $ProcessId
+        if ($processName -and $processName.ToLowerInvariant() -eq "workbuddy") {
+            $targetPid = $ProcessId
+        }
+    }
+
     if ($targetPid -le 0) {
         try {
             $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1

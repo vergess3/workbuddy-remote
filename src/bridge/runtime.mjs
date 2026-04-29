@@ -15,6 +15,12 @@ const RESTART_HELPER_SCRIPT_PATH = path.resolve(
   "workbuddy-restart-instance.ps1"
 );
 
+function resolvePowerShellExePath() {
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  const candidate = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return existsSync(candidate) ? candidate : "powershell.exe";
+}
+
 function unwrapTransportPayload(payload) {
   if (!payload || payload.kind === "json") {
     return payload?.value;
@@ -836,7 +842,8 @@ class BridgeRuntime {
       throw new Error("Restart is unavailable for the current bridge session.");
     }
 
-    const psArgs = [
+    const helperArgs = [
+      "-NoProfile",
       "-ExecutionPolicy",
       "Bypass",
       "-File",
@@ -858,23 +865,14 @@ class BridgeRuntime {
     ];
 
     if (this.options.logPath) {
-      psArgs.push("-LogPath", this.options.logPath);
+      helperArgs.push("-LogPath", this.options.logPath);
     }
     if (this.options.passwordHash) {
-      psArgs.push("-PasswordHash", this.options.passwordHash);
+      helperArgs.push("-PasswordHash", this.options.passwordHash);
     }
     if (this.options.openBrowser) {
-      psArgs.push("-OpenBrowser");
+      helperArgs.push("-OpenBrowser");
     }
-
-    const quotedPsArgs = psArgs.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(", ");
-    const bootstrapArgs = [
-      "-NoProfile",
-      "-WindowStyle",
-      "Hidden",
-      "-Command",
-      `Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList @(${quotedPsArgs})`,
-    ];
 
     logger.info("process.restart_helper.starting", "Starting restart helper", {
       currentBridgePid: process.pid,
@@ -883,15 +881,26 @@ class BridgeRuntime {
       bridgePort: this.options.listenPort,
     });
 
-    spawn("powershell.exe", bootstrapArgs, {
+    const child = spawn(resolvePowerShellExePath(), helperArgs, {
       stdio: "ignore",
       windowsHide: true,
       detached: true,
-    }).unref();
+    });
+
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    child.unref();
+
+    logger.info("process.restart_helper.started", "Restart helper process spawned", {
+      helperPid: child.pid,
+    });
 
     return {
       ok: true,
       restarting: true,
+      helperPid: child.pid,
     };
   }
 
