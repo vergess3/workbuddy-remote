@@ -44,6 +44,10 @@ function renderWorkBuddyNativeHtml(sourceHtml) {
   if (!html.includes("/bridge/workbuddy-native-shim.js")) {
     html = html.replace(/(<script\s+type="module"\s+crossorigin\s+src=)/u, `${shimTag}$1`);
   }
+  html = html.replace(
+    /\b(src|href)=(["']\.\/assets\/(?:index|setting)-[\w-]+\.js)(["'])/gu,
+    '$1=$2?wb-remote-patch=4$3'
+  );
   return html;
 }
 
@@ -2302,12 +2306,23 @@ function renderWorkBuddyNativeShimJs({
   function getTopApplicationMenuBottom() {
     let bottom = 0;
     const viewportLimit = Math.min(150, Math.max(72, window.innerHeight * 0.16));
-    for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex]")) {
+    const candidates = new Set(document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex]"));
+    for (const element of document.querySelectorAll("div,span")) {
+      if (/^(?:workbuddy|edit(?:\\([a-z]\\))?|window(?:\\([a-z]\\))?|help(?:\\([a-z]\\))?|编辑(?:\\([a-z]\\))?|窗口(?:\\([a-z]\\))?|帮助(?:\\([a-z]\\))?)$/iu.test(getDirectControlText(element))) {
+        candidates.add(element);
+      }
+    }
+    for (const control of candidates) {
       if (!isTopApplicationMenuControl(control)) {
         continue;
       }
       const rect = getVisibleElementRect(control);
-      if (rect && rect.top <= viewportLimit && rect.left <= window.innerWidth * 0.72) {
+      if (
+        rect &&
+        rect.top <= viewportLimit &&
+        rect.left <= window.innerWidth * 0.72 &&
+        rect.height <= 96
+      ) {
         bottom = Math.max(bottom, rect.bottom);
       }
     }
@@ -2538,7 +2553,50 @@ function renderWorkBuddyNativeShimJs({
     mobileNavigationAssist.lastKnownOpenAt = Date.now();
   }
 
+  function readNativeMobileSidebarState() {
+    const getter = globalThis.__workbuddyRemoteGetSidebarState;
+    if (typeof getter !== "function") {
+      return null;
+    }
+    try {
+      const state = getter();
+      if (!state || typeof state !== "object" || typeof state.open !== "boolean") {
+        return null;
+      }
+      rememberMobileSidebarState(state.open);
+      return state;
+    } catch {
+      return null;
+    }
+  }
+
+  function callWorkBuddyRemoteSidebarToggle(nextOpenState = null) {
+    const toggle = globalThis.__workbuddyRemoteToggleSidebar;
+    if (typeof toggle !== "function") {
+      return false;
+    }
+    const currentState = readNativeMobileSidebarState();
+    if (nextOpenState !== null && currentState?.open === nextOpenState) {
+      return true;
+    }
+    try {
+      toggle();
+      const expectedOpen = nextOpenState === null ? !Boolean(currentState?.open) : Boolean(nextOpenState);
+      rememberMobileSidebarState(expectedOpen);
+      mobileNavigationAssist.lastActivationAt = Date.now();
+      scheduleMobileNavigationRefresh();
+      return true;
+    } catch (error) {
+      console.warn("[workbuddy-remote] Failed to toggle WorkBuddy sidebar:", error);
+      return false;
+    }
+  }
+
   function getMobileSidebarOpenState(control = mobileNavigationAssist.lastToggle) {
+    const nativeState = readNativeMobileSidebarState();
+    if (nativeState) {
+      return nativeState.open;
+    }
     const toggleState = readMobileNavigationToggleState(control);
     if (toggleState === true) {
       rememberMobileSidebarState(true);
@@ -2608,6 +2666,9 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function activateMobileNavigation(nextOpenState = null) {
+    if (callWorkBuddyRemoteSidebarToggle(nextOpenState)) {
+      return true;
+    }
     const preferClose = nextOpenState === false;
     const control =
       (preferClose ? findMobileNavigationCloseCandidate() : null) ||
@@ -2623,7 +2684,7 @@ function renderWorkBuddyNativeShimJs({
     }
     const style = document.createElement("style");
     style.id = styleId;
-    style.textContent = "@media (hover: none) and (pointer: coarse), (max-width: 820px) { html, body { overscroll-behavior-x: contain; } }";
+    style.textContent = "@media (hover: none) and (pointer: coarse), (max-width: 820px) { html, body { overscroll-behavior-x: contain; } input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox'] { font-size: 16px !important; line-height: 1.35 !important; } input::placeholder, textarea::placeholder { font-size: inherit !important; } }";
     (document.head || document.documentElement || document.body)?.appendChild(style);
   }
 
@@ -2666,6 +2727,26 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     ensureMobileNavigationStyleSheet();
+    if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
+      const hitTarget = ensureMobileNavigationHitTarget();
+      const width = Math.min(76, Math.max(60, window.innerWidth * 0.18));
+      const height = Math.min(84, Math.max(66, window.innerHeight * 0.085));
+      const top = Math.max(58, Math.min(getTopApplicationMenuBottom() + 2, window.innerHeight - height));
+      const nextStyle = {
+        left: "0px",
+        top: top + "px",
+        width: width + "px",
+        height: height + "px",
+        display: "block",
+        pointerEvents: "auto",
+      };
+      for (const [name, value] of Object.entries(nextStyle)) {
+        if (hitTarget.style[name] !== value) {
+          hitTarget.style[name] = value;
+        }
+      }
+      return;
+    }
     const control = findMobileNavigationToggleCandidate() ||
       (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
     if (!control) {
@@ -2707,6 +2788,10 @@ function renderWorkBuddyNativeShimJs({
 
   function startMobileNavigationGesture(x, y, target) {
     if (!isMobileTouchViewport() || isEditableTarget(target)) {
+      mobileNavigationAssist.gesture = null;
+      return;
+    }
+    if (y <= Math.max(48, getTopApplicationMenuBottom())) {
       mobileNavigationAssist.gesture = null;
       return;
     }

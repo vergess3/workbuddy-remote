@@ -406,6 +406,15 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
   if (shouldPatchMainIndex && patched.includes(wecomStatusUnhandledFrom)) {
     patched = patched.replace(wecomStatusUnhandledFrom, wecomStatusUnhandledTo);
   }
+  if (shouldPatchMainIndex) {
+    const sidebarToggleExposeFrom =
+      'const applySmartSpaceLayout = (0, import_react.useCallback)((options) => {';
+    const sidebarToggleExposeTo =
+      'try { globalThis.__workbuddyRemoteToggleSidebar = handleToggleSidebar; globalThis.__workbuddyRemoteGetSidebarState = () => { let drawerOpen = false; try { drawerOpen = Boolean(gridRef.current?.isDrawerOpen?.(sidebarGridViewRef.current)); } catch {} return { open: isLocalMode ? !workbuddyHidden : isNarrowForSidebar ? drawerOpen : sidebarExpanded, collapsed: isLocalMode ? workbuddyHidden : !sidebarExpanded, narrow: isNarrowForSidebar, local: isLocalMode }; }; } catch {} const applySmartSpaceLayout = (0, import_react.useCallback)((options) => {';
+    if (patched.includes(sidebarToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleSidebar")) {
+      patched = patched.replace(sidebarToggleExposeFrom, sidebarToggleExposeTo);
+    }
+  }
 
   sendVersionedScript(req, res, patched, {
     etag: `"workbuddy-asset-${fileName}-${patched.length}"`,
