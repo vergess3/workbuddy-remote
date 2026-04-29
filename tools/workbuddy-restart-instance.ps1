@@ -26,6 +26,8 @@ param(
 
     [switch]$ShowReadyWindow,
 
+    [switch]$HideWorkBuddyWindowAfterStart,
+
     [switch]$OpenBrowser
 )
 
@@ -206,6 +208,9 @@ function Build-StartupArgumentList {
     }
     if ($OpenBrowser) {
         $args += "-OpenBrowser"
+    }
+    if ($HideWorkBuddyWindowAfterStart) {
+        $args += "-HideWorkBuddyWindowAfterStart"
     }
 
     return $args

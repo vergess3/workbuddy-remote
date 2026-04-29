@@ -6,6 +6,7 @@ param(
     [string]$UserDataDir,
     [string]$PasswordHash,
     [switch]$KillWorkBuddyProcessesBeforeStart,
+    [switch]$HideWorkBuddyWindowAfterStart,
     [switch]$OpenBrowser
 )
 
@@ -366,6 +367,9 @@ if (-not $PSBoundParameters.ContainsKey("PasswordHash") -or [string]::IsNullOrWh
 if (-not $PSBoundParameters.ContainsKey("KillWorkBuddyProcessesBeforeStart")) {
     $KillWorkBuddyProcessesBeforeStart = Get-ConfigBool -Config $config -Name "killWorkBuddyProcessesBeforeStart" -Fallback $false
 }
+if (-not $PSBoundParameters.ContainsKey("HideWorkBuddyWindowAfterStart")) {
+    $HideWorkBuddyWindowAfterStart = Get-ConfigBool -Config $config -Name "hideWorkBuddyWindowAfterStart" -Fallback $false
+}
 
 $normalizedListenHost = $ListenHost.Trim().ToLowerInvariant()
 if ($normalizedListenHost -notin @("127.0.0.1", "localhost", "::1") -and -not $PasswordHash) {
@@ -441,6 +445,9 @@ if ($PasswordHash) {
 }
 if ($OpenBrowser) {
     $bridgeArgs += "--open-browser"
+}
+if ($HideWorkBuddyWindowAfterStart) {
+    $bridgeArgs += "--hide-workbuddy-window-after-start"
 }
 
 $previousWorkBuddyExePath = $env:WORKBUDDY_EXE_PATH

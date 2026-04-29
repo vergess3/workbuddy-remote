@@ -79,11 +79,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\start-workbuddy-remote.ps1 -Lis
   "bridgePort": 8780,
   "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": false,
+  "hideWorkBuddyWindowAfterStart": true,
   "maskBridgeModelSecrets": true
 }
 ```
 
 `workbuddyExePath` 留空时会自动查找常见安装路径。
+
+`hideWorkBuddyWindowAfterStart` 设为 `true` 时，bridge 连接到 WorkBuddy 后会自动请求隐藏桌面窗口；WorkBuddy 进程和托盘仍保留，浏览器页面继续可用。
 
 `maskBridgeModelSecrets` 设为 `true` 时，bridge 会先在服务端拦截模型配置读取结果，把接口地址 / Base URL 和 API Key 替换成占位值，再返回给浏览器；页面上也会继续把对应输入框显示为圆点。
 

@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = Object.freeze({
   bridgePort: 8780,
   listenHost: "127.0.0.1",
   killWorkBuddyProcessesBeforeStart: false,
+  hideWorkBuddyWindowAfterStart: false,
   showReadyWindow: false,
   workspaceRoots: [],
   maskBridgeModelSecrets: false,
@@ -91,6 +92,10 @@ async function loadConfig() {
     killWorkBuddyProcessesBeforeStart: normalizeBoolean(
       raw?.killWorkBuddyProcessesBeforeStart,
       DEFAULT_CONFIG.killWorkBuddyProcessesBeforeStart
+    ),
+    hideWorkBuddyWindowAfterStart: normalizeBoolean(
+      raw?.hideWorkBuddyWindowAfterStart,
+      DEFAULT_CONFIG.hideWorkBuddyWindowAfterStart
     ),
     showReadyWindow: normalizeBoolean(
       raw?.showReadyWindow,

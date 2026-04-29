@@ -15,6 +15,7 @@ const DEFAULTS = {
   userDataDir: "",
   workbuddyPid: 0,
   openBrowser: false,
+  hideWorkBuddyWindowAfterStart: false,
   logPath: "",
 };
 
@@ -54,6 +55,9 @@ function parseArgs(argv) {
         break;
       case "--open-browser":
         options.openBrowser = true;
+        break;
+      case "--hide-workbuddy-window-after-start":
+        options.hideWorkBuddyWindowAfterStart = true;
         break;
       case "--log-path":
         options.logPath = next || "";

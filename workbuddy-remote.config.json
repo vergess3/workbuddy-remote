@@ -4,8 +4,9 @@
   "runtimeRootDir": "output/runtime",
   "cdpPort": 9333,
   "bridgePort": 8780,
-  "listenHost": "127.0.0.1",
-  "killWorkBuddyProcessesBeforeStart": true,
+  "listenHost": "0.0.0.0",
+  "killWorkBuddyProcessesBeforeStart": false,
+  "hideWorkBuddyWindowAfterStart": true,
   "maskBridgeModelSecrets": true,
   "enableFileManager": true,
   "enableRestart": true

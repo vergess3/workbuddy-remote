@@ -548,6 +548,7 @@ class BridgeRuntime {
     this.browserSocketSubscriptions = new Map();
     this.buddyApiSubscriptionRefCounts = new Map();
     this.warmupPromise = null;
+    this.hideWindowAfterStartAttempted = false;
   }
 
   async initialize() {
@@ -647,6 +648,7 @@ class BridgeRuntime {
       this.lastTargetCheckAt = Date.now();
       this.targetUrl = target.url;
       await this.restoreBuddyApiSubscriptions();
+      await this.hideWorkBuddyWindowAfterStart();
 
       if (forceRefresh || shouldReplaceClient || previousTargetUrl !== target.url) {
         logger.info("cdp.target.attached", "Attached WorkBuddy renderer target", {
@@ -662,6 +664,44 @@ class BridgeRuntime {
     } finally {
       this.reconnectPromise = null;
     }
+  }
+
+  async hideWorkBuddyWindowAfterStart() {
+    if (!this.options.hideWorkBuddyWindowAfterStart || this.hideWindowAfterStartAttempted) {
+      return;
+    }
+
+    this.hideWindowAfterStartAttempted = true;
+    const methods = ["windowCloseAgentManager", "closeWindow"];
+    const errors = [];
+    for (const method of methods) {
+      try {
+        await this.cdp.evaluate(
+          `globalThis.__workbuddyBridge.callBuddyApi(${JSON.stringify(method)}, [])`
+        );
+        logger.info("workbuddy.window.hidden_after_start", "Requested WorkBuddy window hide after startup", {
+          method,
+        });
+        return;
+      } catch (error) {
+        errors.push({
+          method,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        if (!this.isMissingBuddyApiHandlerError(error)) {
+          logger.warn("workbuddy.window.hide_after_start_error", "Failed to hide WorkBuddy window after startup", {
+            method,
+            error,
+          });
+        }
+      }
+    }
+
+    logger.warn(
+      "workbuddy.window.hide_after_start_unavailable",
+      "No WorkBuddy window hide method succeeded after startup",
+      { errors }
+    );
   }
 
   isRecoverableCdpError(error) {
@@ -1035,6 +1075,9 @@ class BridgeRuntime {
     }
     if (this.options.openBrowser) {
       helperArgs.push("-OpenBrowser");
+    }
+    if (this.options.hideWorkBuddyWindowAfterStart) {
+      helperArgs.push("-HideWorkBuddyWindowAfterStart");
     }
 
     logger.info("process.restart_helper.starting", "Starting restart helper", {

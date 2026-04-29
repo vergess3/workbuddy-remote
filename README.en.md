@@ -57,10 +57,13 @@ Remote listening requires a password hash.
   "bridgePort": 8780,
   "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": false,
+  "hideWorkBuddyWindowAfterStart": true,
   "maskBridgeModelSecrets": true
 }
 ```
 
 When `maskBridgeModelSecrets` is `true`, the bridge redacts model API address / Base URL and API Key values on the server before returning config data to the browser, and the page also masks those inputs visually.
+
+When `hideWorkBuddyWindowAfterStart` is `true`, the bridge asks WorkBuddy to hide its desktop window after the CDP connection is ready. The WorkBuddy process and tray entry stay alive, so the browser page remains usable.
 
 Refreshing the web page only recreates the browser WebSocket. It does not create a new WorkBuddy process, and socket cleanup releases event subscriptions for the closed page.
