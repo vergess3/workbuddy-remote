@@ -1,0 +1,9 @@
+{
+  "workbuddyExePath": "",
+  "workbuddyUserDataDir": "",
+  "runtimeRootDir": "output/runtime",
+  "cdpPort": 9333,
+  "bridgePort": 8780,
+  "listenHost": "127.0.0.1",
+  "killWorkBuddyProcessesBeforeStart": true
+}
