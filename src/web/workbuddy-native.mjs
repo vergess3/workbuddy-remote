@@ -555,11 +555,11 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function isNativeNewWorkspaceText(text) {
-    const normalized = String(text || "").replace(/\s+/g, " ").trim();
-    return /^(?:从新工作空间开始|Start from a new workspace)(?:\s*[✓✔])?$/iu.test(normalized);
+    const normalized = String(text || "").replace(/[✓✔]/gu, "").replace(/\s+/g, " ").trim();
+    return /^(?:从新工作空间开始|Start from a new workspace)$/iu.test(normalized);
   }
 
-  function rememberNativeNewWorkspaceIntentFromEvent(event) {
+  function getNativeNewWorkspaceElementFromEvent(event) {
     for (const item of event.composedPath?.() || []) {
       if (!item || item.nodeType !== 1 || item === document.body || item === document.documentElement) {
         continue;
@@ -572,9 +572,15 @@ function renderWorkBuddyNativeShimJs({
         .filter(Boolean)
         .join(" ");
       if (text.length <= 80 && isNativeNewWorkspaceText(text)) {
-        nativeNewWorkspaceIntentAt = Date.now();
-        return;
+        return item;
       }
+    }
+    return null;
+  }
+
+  function rememberNativeNewWorkspaceIntentFromEvent(event) {
+    if (getNativeNewWorkspaceElementFromEvent(event)) {
+      nativeNewWorkspaceIntentAt = Date.now();
     }
   }
 
@@ -1296,6 +1302,17 @@ function renderWorkBuddyNativeShimJs({
     }
     pendingNativeNewWorkspacePath = result.path;
     return result.path;
+  }
+
+  async function promptAndOpenNativeWorkspace() {
+    nativeNewWorkspaceIntentAt = 0;
+    const folderPath = await promptAndCreateNativeWorkspace();
+    if (!folderPath) {
+      return false;
+    }
+    pendingNativeNewWorkspacePath = "";
+    await forwardBuddyApiCall("workspaceOpen", replacePathCandidateInArgs([], folderPath));
+    return true;
   }
 
   async function resolveKnownWorkspaceFolderPath(targetPath) {
@@ -2177,6 +2194,17 @@ function renderWorkBuddyNativeShimJs({
 
   function installDomCommandInterceptors() {
     const handler = (event) => {
+      const nativeNewWorkspaceElement = fileManagerEnabled ? getNativeNewWorkspaceElementFromEvent(event) : null;
+      if (event.type === "click" && nativeNewWorkspaceElement && !nativeNewWorkspaceElement.closest?.("[id^='wb-bridge-']")) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        promptAndOpenNativeWorkspace().catch((error) => {
+          console.error("[workbuddy-remote] native new workspace failed", error);
+          window.alert(error instanceof Error ? error.message : String(error));
+        });
+        return;
+      }
       const control = getControlFromEvent(event);
       if (!control) {
         return;
