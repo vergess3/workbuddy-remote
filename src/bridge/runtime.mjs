@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +19,18 @@ function resolvePowerShellExePath() {
   const systemRoot = process.env.SystemRoot || "C:\\Windows";
   const candidate = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   return existsSync(candidate) ? candidate : "powershell.exe";
+}
+
+function resolveRestartLogPaths(logPath, listenPort) {
+  const logDir = logPath ? path.dirname(logPath) : path.resolve(__dirname, "..", "..", "output", "runtime", "temp");
+  mkdirSync(logDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const prefix = path.join(logDir, `restart-${listenPort || "bridge"}-${stamp}`);
+  return {
+    eventLogPath: `${prefix}.events.log`,
+    stdoutPath: `${prefix}.out.log`,
+    stderrPath: `${prefix}.err.log`,
+  };
 }
 
 function unwrapTransportPayload(payload) {
@@ -947,6 +959,7 @@ class BridgeRuntime {
       throw new Error("Restart is unavailable for the current bridge session.");
     }
 
+    const restartLogs = resolveRestartLogPaths(this.options.logPath, this.options.listenPort);
     const helperArgs = [
       "-NoProfile",
       "-ExecutionPolicy",
@@ -969,9 +982,7 @@ class BridgeRuntime {
       "hidden",
     ];
 
-    if (this.options.logPath) {
-      helperArgs.push("-LogPath", this.options.logPath);
-    }
+    helperArgs.push("-LogPath", restartLogs.eventLogPath);
     if (this.options.passwordHash) {
       helperArgs.push("-PasswordHash", this.options.passwordHash);
     }
@@ -984,28 +995,66 @@ class BridgeRuntime {
       workbuddyPid: this.options.workbuddyPid,
       cdpPort: this.options.cdpPort,
       bridgePort: this.options.listenPort,
+      restartLogs,
     });
 
-    const child = spawn(resolvePowerShellExePath(), helperArgs, {
-      stdio: "ignore",
-      windowsHide: true,
-      detached: true,
-    });
+    const stdoutFd = openSync(restartLogs.stdoutPath, "a");
+    const stderrFd = openSync(restartLogs.stderrPath, "a");
+    let child;
+    try {
+      child = spawn(resolvePowerShellExePath(), helperArgs, {
+        stdio: ["ignore", stdoutFd, stderrFd],
+        windowsHide: true,
+        detached: true,
+      });
 
-    await new Promise((resolve, reject) => {
-      child.once("spawn", resolve);
-      child.once("error", reject);
-    });
-    child.unref();
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          child.off("spawn", onSpawn);
+          child.off("error", onError);
+          child.off("exit", onExit);
+        };
+        const finish = (fn, value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          cleanup();
+          fn(value);
+        };
+        const onSpawn = () => {
+          setTimeout(() => finish(resolve), 350).unref();
+        };
+        const onError = (error) => finish(reject, error);
+        const onExit = (code, signal) => {
+          finish(
+            reject,
+            new Error(
+              `Restart helper exited before it could take over. Exit code: ${code ?? "null"}, signal: ${signal ?? "null"}. Check ${restartLogs.stderrPath}.`
+            )
+          );
+        };
+        child.once("spawn", onSpawn);
+        child.once("error", onError);
+        child.once("exit", onExit);
+      });
+      child.unref();
+    } finally {
+      closeSync(stdoutFd);
+      closeSync(stderrFd);
+    }
 
     logger.info("process.restart_helper.started", "Restart helper process spawned", {
       helperPid: child.pid,
+      restartLogs,
     });
 
     return {
       ok: true,
       restarting: true,
       helperPid: child.pid,
+      restartLogs,
     };
   }
 

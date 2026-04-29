@@ -140,7 +140,7 @@ function Stop-ProcessTreeMember {
 }
 
 function Get-CurrentUserWorkBuddyProcessIds {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
     try {
         $processes = @(Get-CimInstance Win32_Process -Filter "Name='WorkBuddy.exe'" -ErrorAction Stop)
@@ -152,13 +152,12 @@ function Get-CurrentUserWorkBuddyProcessIds {
     $processIds = @()
     foreach ($process in $processes) {
         try {
-            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
-            if ($owner.ReturnValue -ne 0 -or -not $owner.User) {
+            $ownerSid = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+            if ($ownerSid.ReturnValue -ne 0 -or -not $ownerSid.Sid) {
                 continue
             }
 
-            $ownerName = if ($owner.Domain) { "$($owner.Domain)\$($owner.User)" } else { $owner.User }
-            if ([string]::Equals($ownerName, $identity, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ([string]::Equals($ownerSid.Sid, $currentSid, [System.StringComparison]::OrdinalIgnoreCase)) {
                 $processIds += [int]$process.ProcessId
             }
         }

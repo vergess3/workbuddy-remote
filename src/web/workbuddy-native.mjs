@@ -88,12 +88,11 @@ function renderWorkBuddyNativeShimJs({
       workspaceRootMissing: "未找到工作空间根目录。",
       failedLoadDriveContents: "加载根目录内容失败。",
       restartProgram: "重启程序",
-      restartConfirmTitle: "确认重启当前程序",
-      restartConfirmDescription: "这会关闭当前这个 WorkBuddy 和 bridge，然后按相同参数重新拉起。",
+      restartConfirmTitle: "确认重启程序",
+      restartConfirmDescription: "这会关闭当前用户正在运行的所有 WorkBuddy 进程和当前 bridge，然后重新启动一次。",
       restartConfirmAction: "确认重启",
-      restartConfirmWarning: "只会重启当前这一组实例，不会关闭其他 WorkBuddy。",
-      restartStarting: "正在重启当前 WorkBuddy，稍后会自动重新连接...",
-      restartTimeout: "重启已发起，但等待重新连接超时，请手动刷新页面确认。",
+      restartConfirmWarning: "会结束当前用户下的所有 WorkBuddy 进程，请确认没有其他正在进行的任务。",
+      restartStarting: "正在重启 WorkBuddy。完成后请手动刷新页面。",
       drive: "根目录",
       selectDrive: "请选择根目录",
       workspace: "工作空间",
@@ -148,12 +147,11 @@ function renderWorkBuddyNativeShimJs({
       workspaceRootMissing: "Workspace root was not found.",
       failedLoadDriveContents: "Failed to load root contents.",
       restartProgram: "Restart",
-      restartConfirmTitle: "Restart current app",
-      restartConfirmDescription: "This will close the current WorkBuddy and bridge, then start them again with the same parameters.",
+      restartConfirmTitle: "Restart app",
+      restartConfirmDescription: "This will close every WorkBuddy process for the current user and the current bridge, then start one instance again.",
       restartConfirmAction: "Restart",
-      restartConfirmWarning: "Only this launch will be restarted. Other WorkBuddy instances will not be closed.",
-      restartStarting: "Restarting the current WorkBuddy instance. The page will reconnect automatically...",
-      restartTimeout: "Restart was triggered, but reconnection timed out. Refresh the page manually to check the result.",
+      restartConfirmWarning: "All WorkBuddy processes owned by the current user will be stopped. Make sure no other task is still running.",
+      restartStarting: "Restarting WorkBuddy. Refresh this page manually after it starts again.",
       drive: "Root",
       selectDrive: "Select a root",
       workspace: "Workspace",
@@ -541,6 +539,7 @@ function renderWorkBuddyNativeShimJs({
     };
 
     add(await getCurrentWorkspacePath());
+    add(await getGeneratedWorkspacePath());
     for (const entry of await fetchWorkspaceContextCandidates()) {
       add(entry);
     }
@@ -608,13 +607,24 @@ function renderWorkBuddyNativeShimJs({
     }
   }
 
+  async function getGeneratedWorkspacePath() {
+    try {
+      const generated = await forwardBuddyApiCall("workspaceGenerateDefaultCwd", []);
+      return readWorkspacePath(generated);
+    } catch {
+      return "";
+    }
+  }
+
   async function resolveFileManagerTargetPath(targetPath = "") {
     const normalizedTargetPath = normalizeLocalPathInput(targetPath);
     if (normalizedTargetPath && isLocalPathLike(normalizedTargetPath)) {
       return normalizedTargetPath;
     }
 
-    const currentWorkspacePath = normalizeLocalPathInput(await getCurrentWorkspacePath());
+    const currentWorkspacePath =
+      normalizeLocalPathInput(await getCurrentWorkspacePath()) ||
+      normalizeLocalPathInput(await getGeneratedWorkspacePath());
     if (normalizedTargetPath && currentWorkspacePath && isRelativePathLike(normalizedTargetPath)) {
       return joinWindowsPath(currentWorkspacePath, normalizedTargetPath);
     }
@@ -1696,33 +1706,6 @@ function renderWorkBuddyNativeShimJs({
     };
   }
 
-  async function waitForBridgeRecovery({ timeoutMs = 90000, intervalMs = 1200 } = {}) {
-    const startedAt = Date.now();
-    let sawDisconnect = false;
-    while (Date.now() - startedAt < timeoutMs) {
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        sawDisconnect = true;
-      }
-      try {
-        const response = await fetch("/readyz?restart=" + Date.now(), { cache: "no-store" });
-        if (response.ok) {
-          if (sawDisconnect) {
-            window.location.reload();
-            return;
-          }
-        } else {
-          sawDisconnect = true;
-        }
-      } catch {
-        sawDisconnect = true;
-      }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-    restartInProgress = false;
-    ensureRestartButton();
-    throw new Error(t("restartTimeout"));
-  }
-
   async function requestBridgeRestart() {
     if (restartInProgress) {
       return;
@@ -1744,12 +1727,12 @@ function renderWorkBuddyNativeShimJs({
     setBridgeStatus(t("restartStarting"));
     try {
       await request({ type: "restart-app" });
+      setBridgeStatus(t("restartStarting"));
     } catch (error) {
       restartInProgress = false;
       ensureRestartButton();
       throw error;
     }
-    await waitForBridgeRecovery();
   }
 
   function ensureFileManagerButton() {
