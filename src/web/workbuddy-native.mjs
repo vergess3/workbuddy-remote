@@ -2778,46 +2778,13 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     ensureMobileNavigationStyleSheet();
-    if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
-      const hitTarget = ensureMobileNavigationHitTarget();
-      const band = getMobileNavigationHitBand();
-      const nextStyle = {
-        left: band.left + "px",
-        top: band.top + "px",
-        width: band.width + "px",
-        height: band.height + "px",
-        display: "block",
-        pointerEvents: "auto",
-      };
-      for (const [name, value] of Object.entries(nextStyle)) {
-        if (hitTarget.style[name] !== value) {
-          hitTarget.style[name] = value;
-        }
-      }
-      return;
-    }
-    const control = findMobileNavigationToggleCandidate() ||
-      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
-    if (!control) {
-      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
-      return;
-    }
-    mobileNavigationAssist.lastToggle = control;
-    applyMobileNavigationTouchHandling(control);
-    const rect = getVisibleElementRect(control);
-    if (!rect) {
-      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
-      return;
-    }
     const hitTarget = ensureMobileNavigationHitTarget();
-    const size = Math.max(52, Math.min(72, Math.max(rect.width, rect.height) + 28));
-    const left = Math.max(0, Math.min(rect.left - Math.max(10, (size - rect.width) / 2), window.innerWidth - size));
-    const top = Math.max(0, Math.min(rect.top - Math.max(12, (size - rect.height) / 2), window.innerHeight - size));
+    const band = getMobileNavigationHitBand();
     const nextStyle = {
-      left: left + "px",
-      top: top + "px",
-      width: size + "px",
-      height: size + "px",
+      left: band.left + "px",
+      top: band.top + "px",
+      width: band.width + "px",
+      height: band.height + "px",
       display: "block",
       pointerEvents: "auto",
     };
@@ -2825,6 +2792,20 @@ function renderWorkBuddyNativeShimJs({
       if (hitTarget.style[name] !== value) {
         hitTarget.style[name] = value;
       }
+    }
+    if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
+      return;
+    }
+    const control = findMobileNavigationToggleCandidate() ||
+      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
+    if (!control) {
+      return;
+    }
+    mobileNavigationAssist.lastToggle = control;
+    applyMobileNavigationTouchHandling(control);
+    const rect = getVisibleElementRect(control);
+    if (!rect) {
+      return;
     }
   }
 
