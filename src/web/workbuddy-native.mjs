@@ -2231,6 +2231,565 @@ function renderWorkBuddyNativeShimJs({
       .join(" ");
   }
 
+  const mobileNavigationAssist = {
+    installed: false,
+    hitTarget: null,
+    lastToggle: null,
+    lastKnownOpen: false,
+    lastKnownOpenAt: 0,
+    lastActivationAt: 0,
+    gesture: null,
+    refreshScheduled: false,
+  };
+
+  function isMobileTouchViewport() {
+    return Boolean(
+      window.matchMedia?.("(hover: none) and (pointer: coarse)")?.matches ||
+      window.innerWidth <= 820
+    );
+  }
+
+  function isEditableTarget(element) {
+    return Boolean(element?.closest?.(
+      "input,textarea,select,[contenteditable='true'],[role='textbox']"
+    ));
+  }
+
+  function getVisibleElementRect(element) {
+    const rect = element?.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    const style = window.getComputedStyle(element);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      Number(style.opacity) === 0
+    ) {
+      return null;
+    }
+    return rect;
+  }
+
+  function getClickableControl(element) {
+    if (!element?.closest) {
+      return null;
+    }
+    const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
+    if (!control || control.closest?.("[id^='wb-bridge-']")) {
+      return null;
+    }
+    return control;
+  }
+
+  function isLikelyWindowControlLabel(label) {
+    return /(minimi[sz]e|maximi[sz]e|restore|close|最小化|最大化|还原|关闭)/iu.test(label);
+  }
+
+  function getMobileMenuSearchBounds() {
+    return {
+      x: Math.min(156, Math.max(104, window.innerWidth * 0.22)),
+      y: Math.min(300, Math.max(150, window.innerHeight * 0.28)),
+    };
+  }
+
+  function scoreMobileNavigationToggle(control, hitCount = 0) {
+    if (!control || control.closest?.("[id^='wb-bridge-']")) {
+      return -1;
+    }
+    const rect = getVisibleElementRect(control);
+    const bounds = getMobileMenuSearchBounds();
+    if (
+      !rect ||
+      rect.left < -8 ||
+      rect.left > bounds.x ||
+      rect.top < 0 ||
+      rect.top > bounds.y ||
+      rect.width < 18 ||
+      rect.height < 18 ||
+      rect.width > 132 ||
+      rect.height > 132
+    ) {
+      return -1;
+    }
+
+    const label = getControlLabel(control).toLowerCase();
+    if (isLikelyWindowControlLabel(label)) {
+      return -1;
+    }
+    const text = String(control.textContent || "");
+    const className = String(control.className || "").toLowerCase();
+    const hasMenuLabel = /(menu|sidebar|history|session|conversation|task|nav|drawer|菜单|侧栏|历史|会话|对话|任务|展开|折叠)/u.test(label + " " + className);
+    const hasMenuGlyph = /[☰≡]/u.test(text);
+    const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
+    const isCompact = rect.width <= 88 && rect.height <= 88;
+    const isSquareish = Math.abs(rect.width - rect.height) <= Math.max(16, Math.min(rect.width, rect.height) * 0.65);
+    const longText = text.replace(/\s+/g, "").length > 4;
+    if (longText && !hasSvg && !hasMenuLabel && !hasMenuGlyph) {
+      return -1;
+    }
+
+    let score = hitCount * 7;
+    if (hasMenuLabel) score += 22;
+    if (hasMenuGlyph) score += 22;
+    if (hasSvg) score += 12;
+    if (isCompact) score += 8;
+    if (isSquareish) score += 5;
+    if (rect.left <= 72) score += 8;
+    if (rect.top >= 36) score += 4;
+    if (longText && !hasMenuLabel && !hasMenuGlyph) score -= 18;
+    return score >= 16 ? score : -1;
+  }
+
+  function withMobileHitTargetPassthrough(callback) {
+    const hitTarget = mobileNavigationAssist.hitTarget;
+    const previousPointerEvents = hitTarget?.style?.pointerEvents;
+    if (hitTarget) {
+      hitTarget.style.pointerEvents = "none";
+    }
+    try {
+      return callback();
+    } finally {
+      if (hitTarget) {
+        hitTarget.style.pointerEvents = previousPointerEvents || "auto";
+      }
+    }
+  }
+
+  function findMobileNavigationToggleCandidate() {
+    return withMobileHitTargetPassthrough(() => {
+      const bounds = getMobileMenuSearchBounds();
+      const hitCounts = new Map();
+      const sampleXs = [16, 28, 40, 56, 72, 92].filter((x) => x <= bounds.x);
+      const sampleStep = 10;
+      for (const x of sampleXs) {
+        for (let y = 28; y <= bounds.y; y += sampleStep) {
+          const control = getClickableControl(document.elementFromPoint(x, y));
+          if (control) {
+            hitCounts.set(control, (hitCounts.get(control) || 0) + 1);
+          }
+        }
+      }
+
+      const candidates = new Set(hitCounts.keys());
+      for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]")) {
+        candidates.add(control);
+      }
+
+      let best = null;
+      let bestScore = -1;
+      for (const control of candidates) {
+        const score = scoreMobileNavigationToggle(control, hitCounts.get(control) || 0);
+        if (score > bestScore) {
+          best = control;
+          bestScore = score;
+        }
+      }
+      return best;
+    });
+  }
+
+  function findMobileNavigationCloseCandidate() {
+    const maxX = Math.min(360, window.innerWidth * 0.88);
+    const maxY = Math.min(280, window.innerHeight * 0.34);
+    let best = null;
+    let bestScore = -1;
+    for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]")) {
+      if (control.closest?.("[id^='wb-bridge-']")) {
+        continue;
+      }
+      const rect = getVisibleElementRect(control);
+      if (!rect || rect.left < -8 || rect.left > maxX || rect.top < 0 || rect.top > maxY || rect.width > 140 || rect.height > 140) {
+        continue;
+      }
+      const label = getControlLabel(control).toLowerCase();
+      const text = String(control.textContent || "");
+      const className = String(control.className || "").toLowerCase();
+      const hasCloseCue = /(close|collapse|hide|sidebar|drawer|menu|关闭|收起|折叠|侧栏|菜单)/u.test(label + " " + className) || /[×✕✖☰≡]/u.test(text);
+      const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
+      if (!hasCloseCue && !hasSvg) {
+        continue;
+      }
+      let score = 0;
+      if (/(close|关闭|收起|折叠)/u.test(label + " " + className)) score += 28;
+      if (/(sidebar|drawer|menu|侧栏|菜单)/u.test(label + " " + className)) score += 18;
+      if (/[×✕✖☰≡]/u.test(text)) score += 18;
+      if (hasSvg) score += 8;
+      if (rect.left <= 96) score += 8;
+      if (rect.width <= 88 && rect.height <= 88) score += 6;
+      if (score > bestScore) {
+        best = control;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  function readMobileNavigationToggleState(control) {
+    const owner = control?.closest?.("[aria-expanded],[aria-pressed],[data-state],[data-open]") || control;
+    const values = [
+      control?.getAttribute?.("aria-expanded"),
+      control?.getAttribute?.("aria-pressed"),
+      control?.getAttribute?.("data-state"),
+      control?.getAttribute?.("data-open"),
+      owner?.getAttribute?.("aria-expanded"),
+      owner?.getAttribute?.("aria-pressed"),
+      owner?.getAttribute?.("data-state"),
+      owner?.getAttribute?.("data-open"),
+    ]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (values.some((value) => value === "true" || value === "open" || value === "expanded")) {
+      return true;
+    }
+    if (values.some((value) => value === "false" || value === "closed" || value === "collapsed")) {
+      return false;
+    }
+    return null;
+  }
+
+  function isLikelyMobileSidebarOpen() {
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    const selector = [
+      "aside",
+      "nav",
+      "[role='navigation']",
+      "[role='dialog']",
+      "[data-state='open']",
+      "[aria-modal='true']",
+      "[class]",
+    ].join(",");
+
+    for (const element of document.querySelectorAll(selector)) {
+      if (element.closest?.("[id^='wb-bridge-']")) {
+        continue;
+      }
+      const tagName = String(element.tagName || "").toLowerCase();
+      const role = String(element.getAttribute?.("role") || "").toLowerCase();
+      const state = String(element.getAttribute?.("data-state") || "").toLowerCase();
+      const className = String(element.className || "").toLowerCase();
+      const hasStrongPanelCue =
+        tagName === "aside" ||
+        role === "navigation" ||
+        role === "dialog" ||
+        state === "open" ||
+        element.getAttribute?.("aria-modal") === "true" ||
+        /(sidebar|drawer|history|session|conversation|task)/u.test(className);
+      const hasWeakPanelCue = tagName === "nav" || /(menu|nav)/u.test(className);
+      if (!hasStrongPanelCue && !hasWeakPanelCue) {
+        continue;
+      }
+      const rect = getVisibleElementRect(element);
+      if (!rect) {
+        continue;
+      }
+      const style = window.getComputedStyle(element);
+      const layered = ["fixed", "absolute", "sticky"].includes(style.position) || Number(style.zIndex) > 0;
+      if (
+        rect.left <= 18 &&
+        rect.right >= Math.min(150, viewportWidth * 0.38) &&
+        rect.width >= Math.min(150, viewportWidth * 0.42) &&
+        rect.width <= viewportWidth * (hasStrongPanelCue ? 1.02 : 0.94) &&
+        rect.height >= viewportHeight * 0.45 &&
+        (layered || rect.top <= 80)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function rememberMobileSidebarState(isOpen) {
+    mobileNavigationAssist.lastKnownOpen = Boolean(isOpen);
+    mobileNavigationAssist.lastKnownOpenAt = Date.now();
+  }
+
+  function getMobileSidebarOpenState(control = mobileNavigationAssist.lastToggle) {
+    const toggleState = readMobileNavigationToggleState(control);
+    if (toggleState === true) {
+      rememberMobileSidebarState(true);
+      return true;
+    }
+    if (isLikelyMobileSidebarOpen()) {
+      rememberMobileSidebarState(true);
+      return true;
+    }
+    if (toggleState === false) {
+      rememberMobileSidebarState(false);
+      return false;
+    }
+    if (mobileNavigationAssist.lastKnownOpen && Date.now() - mobileNavigationAssist.lastKnownOpenAt < 300000) {
+      return true;
+    }
+    rememberMobileSidebarState(false);
+    return false;
+  }
+
+  function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY,
+      screenX: window.screenX + clientX,
+      screenY: window.screenY + clientY,
+      button: 0,
+      buttons: 1,
+    };
+    const dispatch = (type, EventConstructor, init = eventInit) => {
+      try {
+        control.dispatchEvent(new EventConstructor(type, init));
+      } catch {
+        control.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+    };
+    if (typeof PointerEvent !== "undefined") {
+      dispatch("pointerdown", PointerEvent, { ...eventInit, pointerId: 1, pointerType: "touch", isPrimary: true });
+    }
+    dispatch("mousedown", MouseEvent);
+    if (typeof PointerEvent !== "undefined") {
+      dispatch("pointerup", PointerEvent, { ...eventInit, buttons: 0, pointerId: 1, pointerType: "touch", isPrimary: true });
+    }
+    dispatch("mouseup", MouseEvent, { ...eventInit, buttons: 0 });
+    dispatch("click", MouseEvent, { ...eventInit, buttons: 0, detail: 1 });
+  }
+
+  function activateMobileNavigationControl(control, nextOpenState = null) {
+    const target = control?.isConnected ? control : findMobileNavigationToggleCandidate();
+    if (!target) {
+      return false;
+    }
+    mobileNavigationAssist.lastToggle = target;
+    const wasOpen = getMobileSidebarOpenState(target);
+    const rect = getVisibleElementRect(target);
+    const clientX = rect ? rect.left + rect.width / 2 : 32;
+    const clientY = rect ? rect.top + rect.height / 2 : 96;
+    dispatchSyntheticPointerMouseClick(target, clientX, clientY);
+    rememberMobileSidebarState(nextOpenState === null ? !wasOpen : nextOpenState);
+    mobileNavigationAssist.lastActivationAt = Date.now();
+    scheduleMobileNavigationRefresh();
+    return true;
+  }
+
+  function activateMobileNavigation(nextOpenState = null) {
+    const preferClose = nextOpenState === false;
+    const control =
+      (preferClose ? findMobileNavigationCloseCandidate() : null) ||
+      findMobileNavigationToggleCandidate() ||
+      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
+    return activateMobileNavigationControl(control, nextOpenState);
+  }
+
+  function ensureMobileNavigationStyleSheet() {
+    const styleId = "wb-bridge-mobile-navigation-style";
+    if (document.getElementById(styleId)) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent = "@media (hover: none) and (pointer: coarse), (max-width: 820px) { html, body { overscroll-behavior-x: contain; } }";
+    (document.head || document.documentElement || document.body)?.appendChild(style);
+  }
+
+  function ensureMobileNavigationHitTarget() {
+    let hitTarget = mobileNavigationAssist.hitTarget;
+    if (hitTarget?.isConnected) {
+      return hitTarget;
+    }
+    hitTarget = document.createElement("button");
+    hitTarget.id = "wb-bridge-mobile-menu-hit-target";
+    hitTarget.type = "button";
+    hitTarget.tabIndex = -1;
+    hitTarget.setAttribute("aria-label", "Toggle navigation");
+    hitTarget.style.cssText = "position:fixed;z-index:2147483644;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;touch-action:none;-webkit-tap-highlight-color:transparent;";
+    const activate = (event) => {
+      if (!isMobileTouchViewport()) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      if (Date.now() - mobileNavigationAssist.lastActivationAt < 350) {
+        return;
+      }
+      const open = getMobileSidebarOpenState();
+      activateMobileNavigation(!open);
+    };
+    hitTarget.addEventListener("pointerup", activate, true);
+    hitTarget.addEventListener("touchend", activate, { capture: true, passive: false });
+    hitTarget.addEventListener("click", activate, true);
+    document.body.appendChild(hitTarget);
+    mobileNavigationAssist.hitTarget = hitTarget;
+    return hitTarget;
+  }
+
+  function refreshMobileNavigationHitTarget() {
+    mobileNavigationAssist.refreshScheduled = false;
+    if (!isMobileTouchViewport() || !document.body) {
+      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
+      return;
+    }
+    ensureMobileNavigationStyleSheet();
+    const control = findMobileNavigationToggleCandidate() ||
+      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
+    if (!control) {
+      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
+      return;
+    }
+    mobileNavigationAssist.lastToggle = control;
+    const rect = getVisibleElementRect(control);
+    if (!rect) {
+      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
+      return;
+    }
+    const hitTarget = ensureMobileNavigationHitTarget();
+    const size = Math.max(52, Math.min(72, Math.max(rect.width, rect.height) + 28));
+    const left = Math.max(0, Math.min(rect.left - Math.max(10, (size - rect.width) / 2), window.innerWidth - size));
+    const top = Math.max(0, Math.min(rect.top - Math.max(12, (size - rect.height) / 2), window.innerHeight - size));
+    hitTarget.style.left = left + "px";
+    hitTarget.style.top = top + "px";
+    hitTarget.style.width = size + "px";
+    hitTarget.style.height = size + "px";
+    hitTarget.style.display = "block";
+    hitTarget.style.pointerEvents = "auto";
+  }
+
+  function scheduleMobileNavigationRefresh() {
+    if (mobileNavigationAssist.refreshScheduled) {
+      return;
+    }
+    mobileNavigationAssist.refreshScheduled = true;
+    requestAnimationFrame(refreshMobileNavigationHitTarget);
+  }
+
+  function startMobileNavigationGesture(x, y, target) {
+    if (!isMobileTouchViewport() || isEditableTarget(target)) {
+      mobileNavigationAssist.gesture = null;
+      return;
+    }
+    const menuOpen = getMobileSidebarOpenState();
+    const openEdge = Math.min(92, Math.max(52, window.innerWidth * 0.2));
+    const closeEdge = Math.min(420, Math.max(220, window.innerWidth * 0.82));
+    const canOpen = !menuOpen && x <= openEdge;
+    const canClose = menuOpen && x <= closeEdge;
+    mobileNavigationAssist.gesture = canOpen || canClose
+      ? {
+          x,
+          y,
+          time: Date.now(),
+          canOpen,
+          canClose,
+          triggered: false,
+        }
+      : null;
+  }
+
+  function moveMobileNavigationGesture(x, y, event) {
+    const gesture = mobileNavigationAssist.gesture;
+    if (!gesture || gesture.triggered) {
+      return;
+    }
+    const dx = x - gesture.x;
+    const dy = y - gesture.y;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    if (absY > 48 && absY > absX * 1.05) {
+      mobileNavigationAssist.gesture = null;
+      return;
+    }
+    if (absX < 76 || absX < absY * 1.35 || absY > 76) {
+      return;
+    }
+    const elapsed = Math.max(1, Date.now() - gesture.time);
+    if (absX / elapsed < 0.16 && absX < 104) {
+      return;
+    }
+
+    if (dx > 0 && gesture.canOpen) {
+      gesture.triggered = true;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      event.stopImmediatePropagation?.();
+      activateMobileNavigation(true);
+      return;
+    }
+    if (dx < 0 && gesture.canClose) {
+      gesture.triggered = true;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      event.stopImmediatePropagation?.();
+      activateMobileNavigation(false);
+    }
+  }
+
+  function endMobileNavigationGesture(event) {
+    if (mobileNavigationAssist.gesture?.triggered) {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      event?.stopImmediatePropagation?.();
+    }
+    mobileNavigationAssist.gesture = null;
+  }
+
+  function installMobileNavigationAssist() {
+    if (mobileNavigationAssist.installed) {
+      return;
+    }
+    mobileNavigationAssist.installed = true;
+    ensureMobileNavigationStyleSheet();
+    scheduleMobileNavigationRefresh();
+
+    document.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" || event.isPrimary === false) {
+        return;
+      }
+      startMobileNavigationGesture(event.clientX, event.clientY, event.target);
+    }, true);
+    document.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "mouse" || event.isPrimary === false) {
+        return;
+      }
+      moveMobileNavigationGesture(event.clientX, event.clientY, event);
+    }, true);
+    document.addEventListener("pointerup", endMobileNavigationGesture, true);
+    document.addEventListener("pointercancel", endMobileNavigationGesture, true);
+
+    document.addEventListener("touchstart", (event) => {
+      if (event.touches.length !== 1) {
+        mobileNavigationAssist.gesture = null;
+        return;
+      }
+      const touch = event.touches[0];
+      startMobileNavigationGesture(touch.clientX, touch.clientY, event.target);
+    }, { capture: true, passive: true });
+    document.addEventListener("touchmove", (event) => {
+      if (!mobileNavigationAssist.gesture || event.touches.length !== 1) {
+        return;
+      }
+      const touch = event.touches[0];
+      moveMobileNavigationGesture(touch.clientX, touch.clientY, event);
+    }, { capture: true, passive: false });
+    document.addEventListener("touchend", endMobileNavigationGesture, { capture: true, passive: false });
+    document.addEventListener("touchcancel", endMobileNavigationGesture, { capture: true, passive: false });
+
+    window.addEventListener("resize", scheduleMobileNavigationRefresh, { passive: true });
+    window.addEventListener("orientationchange", scheduleMobileNavigationRefresh, { passive: true });
+    window.addEventListener("scroll", scheduleMobileNavigationRefresh, { passive: true, capture: true });
+    const observer = new MutationObserver(scheduleMobileNavigationRefresh);
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-expanded", "aria-pressed", "data-state", "data-open", "style", "class"],
+    });
+    for (const delayMs of [100, 300, 800, 1600, 3000]) {
+      setTimeout(scheduleMobileNavigationRefresh, delayMs);
+    }
+  }
+
   function isOpenFileManagerControlLabel(label) {
     if (/(本地文件|上传|附件|添加文件|upload|attach|add.*file|local.*file)/iu.test(label)) {
       return false;
@@ -2498,6 +3057,7 @@ function renderWorkBuddyNativeShimJs({
     document.addEventListener("DOMContentLoaded", () => {
       installWindowControlHider();
       installSensitiveFieldMasker();
+      installMobileNavigationAssist();
       installWorkspaceHintTracker();
       installDomCommandInterceptors();
       initializeRemoteControls().catch((error) => {
@@ -2507,6 +3067,7 @@ function renderWorkBuddyNativeShimJs({
   } else {
     installWindowControlHider();
     installSensitiveFieldMasker();
+    installMobileNavigationAssist();
     installWorkspaceHintTracker();
     installDomCommandInterceptors();
     initializeRemoteControls().catch((error) => {
