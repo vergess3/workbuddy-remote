@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,48 @@ function resolveRestartLogPaths(logPath, listenPort) {
     stdoutPath: `${prefix}.out.log`,
     stderrPath: `${prefix}.err.log`,
   };
+}
+
+function quotePowerShellString(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
+function quoteWindowsArgument(value) {
+  const input = String(value ?? "");
+  if (input && !/[\s"]/u.test(input)) {
+    return input;
+  }
+
+  let quoted = '"';
+  let backslashCount = 0;
+  for (const char of input) {
+    if (char === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted += "\\".repeat(backslashCount * 2 + 1) + char;
+      backslashCount = 0;
+      continue;
+    }
+    quoted += "\\".repeat(backslashCount) + char;
+    backslashCount = 0;
+  }
+  return quoted + "\\".repeat(backslashCount * 2) + '"';
+}
+
+function buildRestartHelperLauncherCommand({ powerShellPath, helperArgs, stdoutPath, stderrPath }) {
+  const helperCommandLine = helperArgs.map((arg) => quoteWindowsArgument(arg)).join(" ");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Start-Process -FilePath ${quotePowerShellString(powerShellPath)} -WindowStyle Hidden -ArgumentList ${quotePowerShellString(helperCommandLine)} -RedirectStandardOutput ${quotePowerShellString(stdoutPath)} -RedirectStandardError ${quotePowerShellString(stderrPath)}`,
+  ].join("; ");
+}
+
+function appendRestartOutput(logPath, chunk) {
+  try {
+    appendFileSync(logPath, chunk);
+  } catch {}
 }
 
 function unwrapTransportPayload(payload) {
@@ -538,7 +580,6 @@ class BridgeRuntime {
     };
 
     await collectFromApi("workspaceGetCurrent", [], 100);
-    await collectFromApi("workspaceGenerateDefaultCwd", [], 90);
     await collectFromApi("listSessions", [], 60);
     await collectFromApi("storageGetSessions", [], 50);
     await collectFromApi("storageGetWorkspaces", [], 40);
@@ -998,62 +1039,74 @@ class BridgeRuntime {
       restartLogs,
     });
 
-    const stdoutFd = openSync(restartLogs.stdoutPath, "a");
-    const stderrFd = openSync(restartLogs.stderrPath, "a");
     let child;
-    try {
-      child = spawn(resolvePowerShellExePath(), helperArgs, {
-        stdio: ["ignore", stdoutFd, stderrFd],
-        windowsHide: true,
-        detached: true,
-      });
+    const powerShellPath = resolvePowerShellExePath();
+    const launcherArgs = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      buildRestartHelperLauncherCommand({
+        powerShellPath,
+        helperArgs,
+        stdoutPath: restartLogs.stdoutPath,
+        stderrPath: restartLogs.stderrPath,
+      }),
+    ];
 
-      await new Promise((resolve, reject) => {
-        let settled = false;
-        const cleanup = () => {
-          child.off("spawn", onSpawn);
-          child.off("error", onError);
-          child.off("exit", onExit);
-        };
-        const finish = (fn, value) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          cleanup();
-          fn(value);
-        };
-        const onSpawn = () => {
-          setTimeout(() => finish(resolve), 350).unref();
-        };
-        const onError = (error) => finish(reject, error);
-        const onExit = (code, signal) => {
-          finish(
-            reject,
-            new Error(
-              `Restart helper exited before it could take over. Exit code: ${code ?? "null"}, signal: ${signal ?? "null"}. Check ${restartLogs.stderrPath}.`
-            )
-          );
-        };
-        child.once("spawn", onSpawn);
-        child.once("error", onError);
-        child.once("exit", onExit);
-      });
-      child.unref();
-    } finally {
-      closeSync(stdoutFd);
-      closeSync(stderrFd);
-    }
+    child = spawn(powerShellPath, launcherArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout?.on("data", (chunk) => appendRestartOutput(restartLogs.stdoutPath, chunk));
+    child.stderr?.on("data", (chunk) => appendRestartOutput(restartLogs.stderrPath, chunk));
 
-    logger.info("process.restart_helper.started", "Restart helper process spawned", {
-      helperPid: child.pid,
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        child.off("spawn", onSpawn);
+        child.off("error", onError);
+        child.off("exit", onExit);
+      };
+      const finish = (fn, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        fn(value);
+      };
+      const onSpawn = () => {
+        setTimeout(() => finish(resolve), 350).unref();
+      };
+      const onError = (error) => finish(reject, error);
+      const onExit = (code, signal) => {
+        if (code === 0) {
+          finish(resolve);
+          return;
+        }
+        finish(
+          reject,
+          new Error(
+            `Restart helper launcher failed. Exit code: ${code ?? "null"}, signal: ${signal ?? "null"}. Check ${restartLogs.stderrPath}.`
+          )
+        );
+      };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+      child.once("exit", onExit);
+    });
+    child.unref();
+
+    logger.info("process.restart_helper.started", "Restart helper launcher completed", {
+      launcherPid: child.pid,
       restartLogs,
     });
 
     return {
       ok: true,
       restarting: true,
-      helperPid: child.pid,
+      launcherPid: child.pid,
       restartLogs,
     };
   }

@@ -71,6 +71,7 @@ function renderWorkBuddyNativeShimJs({
   let restartInProgress = false;
   let fileManagerOpenPromise = null;
   const pendingUploadProgress = new Map();
+  let lastWorkspaceNameHint = "";
 
   const eventMethodPattern = /^(?:on[A-Z]|\\$on$)/u;
   const messages = {
@@ -493,6 +494,59 @@ function renderWorkBuddyNativeShimJs({
     return folder ? { rootPath: root.path, folder } : null;
   }
 
+  function getPathBasename(targetPath) {
+    return String(targetPath || "").replace(/[\\\\/]+$/g, "").split(/[\\\\/]/u).filter(Boolean).pop() || "";
+  }
+
+  function normalizeWorkspaceName(name) {
+    return String(name || "").trim().toLowerCase();
+  }
+
+  function readWorkspaceNameFromElement(element) {
+    const workspaceItem = element?.closest?.(".workspace-drag-item");
+    const text = workspaceItem?.innerText || workspaceItem?.textContent || "";
+    return String(text).split(/\\r?\\n/u).map((line) => line.trim()).find(Boolean) || "";
+  }
+
+  function rememberWorkspaceHintFromElement(element) {
+    const workspaceName = readWorkspaceNameFromElement(element);
+    if (workspaceName) {
+      lastWorkspaceNameHint = workspaceName;
+    }
+  }
+
+  function getWorkspaceNameHintFromPage() {
+    const focusedName = readWorkspaceNameFromElement(document.activeElement);
+    if (focusedName) {
+      return focusedName;
+    }
+    for (const selector of [".workspace-drag-item:focus-within", ".workspace-drag-item .conversation-agent-card:focus"]) {
+      const name = readWorkspaceNameFromElement(document.querySelector(selector));
+      if (name) {
+        return name;
+      }
+    }
+    return lastWorkspaceNameHint;
+  }
+
+  async function findWorkspaceFolderByName(workspaceName, roots) {
+    const wantedName = normalizeWorkspaceName(workspaceName);
+    if (!wantedName) {
+      return null;
+    }
+
+    for (const root of roots || []) {
+      const payload = await fetchWorkspaceFoldersForLookup(root.path);
+      const folder = (payload?.folders || []).find((entry) => {
+        return normalizeWorkspaceName(entry.name) === wantedName || normalizeWorkspaceName(getPathBasename(entry.path)) === wantedName;
+      });
+      if (folder) {
+        return { rootPath: root.path, folder };
+      }
+    }
+    return null;
+  }
+
   function collectWorkspacePathHintsFromPage() {
     const paths = [];
     const seen = new Set();
@@ -539,7 +593,6 @@ function renderWorkBuddyNativeShimJs({
     };
 
     add(await getCurrentWorkspacePath());
-    add(await getGeneratedWorkspacePath());
     for (const entry of await fetchWorkspaceContextCandidates()) {
       add(entry);
     }
@@ -553,6 +606,11 @@ function renderWorkBuddyNativeShimJs({
     const matchedTarget = targetPath ? await findWorkspaceFolderByPath(targetPath, roots) : null;
     if (matchedTarget) {
       return { rootPath: matchedTarget.rootPath, folderPath: matchedTarget.folder.path };
+    }
+
+    const matchedWorkspaceHint = await findWorkspaceFolderByName(getWorkspaceNameHintFromPage(), roots);
+    if (matchedWorkspaceHint) {
+      return { rootPath: matchedWorkspaceHint.rootPath, folderPath: matchedWorkspaceHint.folder.path };
     }
 
     for (const entry of await getWorkspaceContextPaths()) {
@@ -607,13 +665,22 @@ function renderWorkBuddyNativeShimJs({
     }
   }
 
-  async function getGeneratedWorkspacePath() {
-    try {
-      const generated = await forwardBuddyApiCall("workspaceGenerateDefaultCwd", []);
-      return readWorkspacePath(generated);
-    } catch {
-      return "";
+  async function resolveCurrentWorkspaceFolderPath(targetPath = "") {
+    const roots = await fetchWorkspaceRoots();
+    const normalizedTargetPath = normalizeLocalPathInput(targetPath);
+    const matchedTarget = normalizedTargetPath ? await findWorkspaceFolderByPath(normalizedTargetPath, roots) : null;
+    if (matchedTarget) {
+      return matchedTarget.folder.path;
     }
+
+    const matchedWorkspaceHint = await findWorkspaceFolderByName(getWorkspaceNameHintFromPage(), roots);
+    if (matchedWorkspaceHint) {
+      return matchedWorkspaceHint.folder.path;
+    }
+
+    const currentWorkspacePath = normalizeLocalPathInput(await getCurrentWorkspacePath());
+    const matchedCurrent = currentWorkspacePath ? await findWorkspaceFolderByPath(currentWorkspacePath, roots) : null;
+    return matchedCurrent?.folder?.path || "";
   }
 
   async function resolveFileManagerTargetPath(targetPath = "") {
@@ -621,15 +688,18 @@ function renderWorkBuddyNativeShimJs({
     if (normalizedTargetPath && isLocalPathLike(normalizedTargetPath)) {
       return normalizedTargetPath;
     }
+    if (!normalizedTargetPath) {
+      return "";
+    }
 
     const currentWorkspacePath =
-      normalizeLocalPathInput(await getCurrentWorkspacePath()) ||
-      normalizeLocalPathInput(await getGeneratedWorkspacePath());
+      normalizeLocalPathInput(await resolveCurrentWorkspaceFolderPath()) ||
+      normalizeLocalPathInput(await getCurrentWorkspacePath());
     if (normalizedTargetPath && currentWorkspacePath && isRelativePathLike(normalizedTargetPath)) {
       return joinWindowsPath(currentWorkspacePath, normalizedTargetPath);
     }
 
-    return currentWorkspacePath || normalizedTargetPath;
+    return normalizedTargetPath;
   }
 
   function replacePathCandidateInArgs(args, folderPath) {
@@ -996,7 +1066,7 @@ function renderWorkBuddyNativeShimJs({
         files: [],
       };
     }
-    let folderPath = await getCurrentWorkspacePath();
+    let folderPath = await resolveCurrentWorkspaceFolderPath(getPathCandidateFromArgs([options]));
     if (!folderPath) {
       const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs([options]));
       folderPath = selected?.[0] || "";
@@ -1642,6 +1712,18 @@ function renderWorkBuddyNativeShimJs({
 
   const domCommandDocuments = new WeakSet();
   let domCommandObserver = null;
+  let workspaceHintTrackerInstalled = false;
+
+  function installWorkspaceHintTracker() {
+    if (workspaceHintTrackerInstalled) {
+      return;
+    }
+    workspaceHintTrackerInstalled = true;
+    const handler = (event) => rememberWorkspaceHintFromElement(event.target);
+    for (const type of ["pointerdown", "click", "focusin"]) {
+      document.addEventListener(type, handler, true);
+    }
+  }
 
   function installDomCommandInterceptors() {
     const handler = (event) => {
@@ -1649,6 +1731,7 @@ function renderWorkBuddyNativeShimJs({
       if (!control) {
         return;
       }
+      rememberWorkspaceHintFromElement(control);
       if (!fileManagerEnabled) {
         return;
       }
@@ -1804,6 +1887,7 @@ function renderWorkBuddyNativeShimJs({
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
       installWindowControlHider();
+      installWorkspaceHintTracker();
       installDomCommandInterceptors();
       initializeRemoteControls().catch((error) => {
         console.warn("[workbuddy-remote] remote controls failed", error);
@@ -1811,6 +1895,7 @@ function renderWorkBuddyNativeShimJs({
     }, { once: true });
   } else {
     installWindowControlHider();
+    installWorkspaceHintTracker();
     installDomCommandInterceptors();
     initializeRemoteControls().catch((error) => {
       console.warn("[workbuddy-remote] remote controls failed", error);
@@ -2058,10 +2143,7 @@ function renderWorkBuddyNativeShimJs({
         return true;
       }
       if (isRelativePathLike(targetPath)) {
-        const workspacePath = await getCurrentWorkspacePath();
-        await openWorkspaceFileManagerOnce({
-          targetPath: workspacePath ? joinWindowsPath(workspacePath, targetPath) : targetPath,
-        });
+        await openWorkspaceFileManagerOnce({ targetPath });
         return true;
       }
       return forwardBuddyApiCall(method, args);
