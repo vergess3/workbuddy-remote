@@ -2779,15 +2779,12 @@ function renderWorkBuddyNativeShimJs({
     ensureMobileNavigationStyleSheet();
     if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
       const hitTarget = ensureMobileNavigationHitTarget();
-      const width = getMobileNavigationOpenSwipeEdge();
-      const height = Math.min(128, Math.max(92, window.innerHeight * 0.13));
-      const appMenuBottom = getTopApplicationMenuBottom();
-      const top = Math.max(0, Math.min(appMenuBottom > 0 ? appMenuBottom + 2 : 44, window.innerHeight - height));
+      const band = getMobileNavigationHitBand();
       const nextStyle = {
-        left: "0px",
-        top: top + "px",
-        width: width + "px",
-        height: height + "px",
+        left: band.left + "px",
+        top: band.top + "px",
+        width: band.width + "px",
+        height: band.height + "px",
         display: "block",
         pointerEvents: "auto",
       };
@@ -2840,6 +2837,42 @@ function renderWorkBuddyNativeShimJs({
 
   function getMobileNavigationOpenSwipeEdge() {
     return Math.min(220, Math.max(128, (window.innerWidth || 0) * 0.46));
+  }
+
+  function getMobileNavigationHitBand() {
+    const width = getMobileNavigationOpenSwipeEdge();
+    const height = Math.min(128, Math.max(92, window.innerHeight * 0.13));
+    const appMenuBottom = getTopApplicationMenuBottom();
+    const top = Math.max(0, Math.min(appMenuBottom > 0 ? appMenuBottom + 2 : 44, window.innerHeight - height));
+    return {
+      left: 0,
+      right: width,
+      top,
+      bottom: top + height,
+      width,
+      height,
+    };
+  }
+
+  function shouldHandleMobileNavigationHitPoint(x, y, target) {
+    if (!isMobileTouchViewport() || isEditableTarget(target)) {
+      return false;
+    }
+    const band = getMobileNavigationHitBand();
+    return x >= band.left && x <= band.right && y >= band.top && y <= band.bottom;
+  }
+
+  function handleMobileNavigationDirectHit(event, x, y) {
+    if (!shouldHandleMobileNavigationHitPoint(x, y, event.target)) {
+      return false;
+    }
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    event.stopImmediatePropagation?.();
+    if (Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
+      activateMobileNavigation(!isLikelyMobileSidebarOpen());
+    }
+    return true;
   }
 
   function startMobileNavigationGesture(x, y, target) {
@@ -2926,8 +2959,26 @@ function renderWorkBuddyNativeShimJs({
     ensureMobileNavigationStyleSheet();
     scheduleMobileNavigationRefresh();
 
+    window.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" || event.isPrimary === false) {
+        return;
+      }
+      handleMobileNavigationDirectHit(event, event.clientX, event.clientY);
+    }, true);
+    window.addEventListener("touchstart", (event) => {
+      if (event.touches.length !== 1) {
+        return;
+      }
+      const touch = event.touches[0];
+      handleMobileNavigationDirectHit(event, touch.clientX, touch.clientY);
+    }, { capture: true, passive: false });
+
     document.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "mouse" || event.isPrimary === false) {
+        return;
+      }
+      if (handleMobileNavigationDirectHit(event, event.clientX, event.clientY)) {
+        mobileNavigationAssist.gesture = null;
         return;
       }
       startMobileNavigationGesture(event.clientX, event.clientY, event.target);
@@ -2947,8 +2998,12 @@ function renderWorkBuddyNativeShimJs({
         return;
       }
       const touch = event.touches[0];
+      if (handleMobileNavigationDirectHit(event, touch.clientX, touch.clientY)) {
+        mobileNavigationAssist.gesture = null;
+        return;
+      }
       startMobileNavigationGesture(touch.clientX, touch.clientY, event.target);
-    }, { capture: true, passive: true });
+    }, { capture: true, passive: false });
     document.addEventListener("touchmove", (event) => {
       if (!mobileNavigationAssist.gesture || event.touches.length !== 1) {
         return;
