@@ -29,6 +29,74 @@ function unwrapTransportPayload(payload) {
   return null;
 }
 
+function readTimestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 && value < 10_000_000_000 ? value * 1000 : value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return readTimestampMs(numeric);
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+}
+
+function isWorkspacePathCandidate(value) {
+  return typeof value === "string" && /^[A-Za-z]:[\\/]/u.test(value.trim());
+}
+
+function collectWorkspaceContextPaths(value, candidates, { source, priority = 0, depth = 0 } = {}) {
+  if (!value || candidates.length >= 80 || depth > 5) {
+    return;
+  }
+
+  if (isWorkspacePathCandidate(value)) {
+    candidates.push({
+      path: value.trim(),
+      source,
+      priority,
+      lastActivityAt: 0,
+    });
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 80)) {
+      collectWorkspaceContextPaths(item, candidates, { source, priority, depth: depth + 1 });
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  const lastActivityAt =
+    readTimestampMs(value.updatedAt) ||
+    readTimestampMs(value.lastUpdatedAt) ||
+    readTimestampMs(value.updated_at) ||
+    readTimestampMs(value.lastActivityAt);
+  for (const key of ["path", "folderPath", "workspacePath", "workspaceFolder", "cwd", "fsPath", "defaultPath"]) {
+    if (isWorkspacePathCandidate(value[key])) {
+      candidates.push({
+        path: value[key].trim(),
+        source,
+        priority,
+        lastActivityAt,
+      });
+    }
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    collectWorkspaceContextPaths(nestedValue, candidates, { source, priority, depth: depth + 1 });
+  }
+}
+
 function formatTargetSummary(targets) {
   const pages = Array.isArray(targets) ? targets.filter((entry) => entry?.type === "page") : [];
   if (pages.length === 0) {
@@ -441,6 +509,43 @@ class BridgeRuntime {
 
   isHostConnected() {
     return this.cdp?.ws?.readyState === WebSocket.OPEN && Boolean(this.targetUrl);
+  }
+
+  async getWorkspaceContextCandidates() {
+    const candidates = [];
+    const collectFromApi = async (method, args, priority) => {
+      try {
+        const result = await this.invokeBuddyApi(method, args);
+        collectWorkspaceContextPaths(result, candidates, { source: method, priority });
+      } catch (error) {
+        logger.debug("workspace.context.api_unavailable", "Workspace context API was unavailable", {
+          method,
+          error,
+        });
+      }
+    };
+
+    await collectFromApi("workspaceGetCurrent", [], 100);
+    await collectFromApi("workspaceGenerateDefaultCwd", [], 90);
+    await collectFromApi("listSessions", [], 60);
+    await collectFromApi("storageGetSessions", [], 50);
+    await collectFromApi("storageGetWorkspaces", [], 40);
+
+    candidates.sort(
+      (left, right) =>
+        right.priority - left.priority ||
+        right.lastActivityAt - left.lastActivityAt
+    );
+
+    const seen = new Set();
+    return candidates.filter((candidate) => {
+      const key = String(candidate.path || "").trim().toLowerCase();
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
   }
 
   async ensureCdpReady({ forceRefresh = false } = {}) {

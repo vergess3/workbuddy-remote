@@ -334,6 +334,18 @@ function createRequestHandler(runtime, auth) {
         return;
       }
 
+      if (requestUrl.pathname === "/bridge/workspace-context") {
+        if (!(await isFileManagerEnabled())) {
+          writeFeatureDisabled(res, "File manager");
+          return;
+        }
+        json(res, 200, {
+          ok: true,
+          paths: await runtime.getWorkspaceContextCandidates(),
+        });
+        return;
+      }
+
       if (requestUrl.pathname === "/bridge/workspace-folders") {
         if (!(await isFileManagerEnabled())) {
           writeFeatureDisabled(res, "File manager");

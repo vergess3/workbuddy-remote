@@ -271,6 +271,12 @@ function renderWorkBuddyNativeShimJs({
     return fetchJson("/bridge/workspace-folders?rootPath=" + encodeURIComponent(rootPath || ""));
   }
 
+  function fetchWorkspaceContextCandidates() {
+    return fetchJson("/bridge/workspace-context")
+      .then((payload) => Array.isArray(payload?.paths) ? payload.paths : [])
+      .catch(() => []);
+  }
+
   function createWorkspaceFolder(rootPath, name) {
     return fetchJson("/bridge/workspace-folders", {
       method: "POST",
@@ -467,15 +473,99 @@ function renderWorkBuddyNativeShimJs({
     return matches[0]?.path || "";
   }
 
-  async function resolvePreferredWorkspaceSelection(roots, targetPath) {
-    const preferredRoot = choosePreferredRoot(roots, targetPath);
-    if (!preferredRoot) {
-      return { rootPath: "", folderPath: "" };
+  const workspaceFolderLookupCache = new Map();
+
+  async function fetchWorkspaceFoldersForLookup(rootPath) {
+    if (!workspaceFolderLookupCache.has(rootPath)) {
+      workspaceFolderLookupCache.set(rootPath, fetchWorkspaceFolders(rootPath));
     }
-    const payload = await fetchWorkspaceFolders(preferredRoot).catch(() => null);
+    return workspaceFolderLookupCache.get(rootPath);
+  }
+
+  async function findWorkspaceFolderByPath(targetPath, roots) {
+    const root = (roots || []).find((entry) => isSameOrChildPath(entry.path, targetPath));
+    if (!root) {
+      return null;
+    }
+
+    const payload = await fetchWorkspaceFoldersForLookup(root.path);
+    const folder = (payload?.folders || [])
+      .filter((entry) => isSameOrChildPath(entry.path, targetPath))
+      .sort((left, right) => String(right.path || "").length - String(left.path || "").length)[0];
+    return folder ? { rootPath: root.path, folder } : null;
+  }
+
+  function collectWorkspacePathHintsFromPage() {
+    const paths = [];
+    const seen = new Set();
+    const add = (value) => {
+      const pathValue = normalizeLocalPathInput(value);
+      const key = pathValue.toLowerCase();
+      if (!isLocalPathLike(pathValue) || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      paths.push({ path: pathValue });
+    };
+    const collectMatches = (text) => {
+      const matches = String(text || "").match(/[A-Za-z]:[\\/][^<>"'|?\\r\\n]+/gu) || [];
+      for (const match of matches) {
+        add(match.trim());
+      }
+    };
+
+    collectMatches(location.href);
+    collectMatches(document.title);
+    collectMatches(document.body?.innerText?.slice(0, 160000));
+    for (const storage of [localStorage, sessionStorage]) {
+      try {
+        for (let index = 0; index < storage.length; index += 1) {
+          const key = storage.key(index) || "";
+          if (/(workspace|session|cwd|path|folder)/iu.test(key)) {
+            collectMatches(storage.getItem(key)?.slice(0, 30000));
+          }
+        }
+      } catch {}
+    }
+
+    return paths;
+  }
+
+  async function getWorkspaceContextPaths() {
+    const paths = [];
+    const add = (value) => {
+      const pathValue = normalizeLocalPathInput(typeof value === "string" ? value : value?.path);
+      if (isLocalPathLike(pathValue)) {
+        paths.push({ path: pathValue });
+      }
+    };
+
+    add(await getCurrentWorkspacePath());
+    for (const entry of await fetchWorkspaceContextCandidates()) {
+      add(entry);
+    }
+    for (const entry of collectWorkspacePathHintsFromPage()) {
+      add(entry);
+    }
+    return paths;
+  }
+
+  async function resolvePreferredWorkspaceSelection(roots, targetPath) {
+    const matchedTarget = targetPath ? await findWorkspaceFolderByPath(targetPath, roots) : null;
+    if (matchedTarget) {
+      return { rootPath: matchedTarget.rootPath, folderPath: matchedTarget.folder.path };
+    }
+
+    for (const entry of await getWorkspaceContextPaths()) {
+      const matched = await findWorkspaceFolderByPath(entry.path, roots);
+      if (matched) {
+        return { rootPath: matched.rootPath, folderPath: matched.folder.path };
+      }
+    }
+
     return {
-      rootPath: preferredRoot,
-      folderPath: choosePreferredFolder(payload?.folders || [], targetPath),
+      rootPath: choosePreferredRoot(roots, ""),
+      folderPath: "",
     };
   }
 
@@ -1406,16 +1496,10 @@ function renderWorkBuddyNativeShimJs({
       renderFileList();
       setBusy();
 
-      const preferredRoot = choosePreferredRoot(roots, preferredTargetPath);
-      rootSelect.value = preferredRoot;
-      if (!preferredRoot) {
-        return;
-      }
-      fetchWorkspaceFolders(preferredRoot)
-        .then((payload) => {
-          folders = payload?.folders || [];
-          const preferredFolder = choosePreferredFolder(folders, preferredTargetPath);
-          return loadFoldersForRoot(preferredRoot, preferredFolder);
+      resolvePreferredWorkspaceSelection(roots, preferredTargetPath)
+        .then(({ rootPath, folderPath }) => {
+          rootSelect.value = rootPath;
+          return rootPath ? loadFoldersForRoot(rootPath, folderPath) : null;
         })
         .catch(fail);
     });

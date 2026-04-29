@@ -139,32 +139,52 @@ function Stop-ProcessTreeMember {
     }
 }
 
-function Stop-WorkBuddyInstance {
-    param(
-        [int]$ProcessId,
-        [int]$Port
-    )
+function Get-CurrentUserWorkBuddyProcessIds {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    $targetPid = 0
-    if ($ProcessId -gt 0) {
-        $processName = Get-ProcessNameSafe -ProcessId $ProcessId
-        if ($processName -and $processName.ToLowerInvariant() -eq "workbuddy") {
-            $targetPid = $ProcessId
-        }
+    try {
+        $processes = @(Get-CimInstance Win32_Process -Filter "Name='WorkBuddy.exe'" -ErrorAction Stop)
+    }
+    catch {
+        return @()
     }
 
-    if ($targetPid -le 0) {
+    $processIds = @()
+    foreach ($process in $processes) {
         try {
-            $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
-            if ($connection) {
-                $targetPid = [int]$connection.OwningProcess
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+            if ($owner.ReturnValue -ne 0 -or -not $owner.User) {
+                continue
+            }
+
+            $ownerName = if ($owner.Domain) { "$($owner.Domain)\$($owner.User)" } else { $owner.User }
+            if ([string]::Equals($ownerName, $identity, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $processIds += [int]$process.ProcessId
             }
         }
         catch {
         }
     }
 
-    Stop-ProcessTreeMember -ProcessId $targetPid -AllowedNames @("workbuddy")
+    return @($processIds | Sort-Object -Unique)
+}
+
+function Stop-CurrentUserWorkBuddyProcesses {
+    $processIds = @(Get-CurrentUserWorkBuddyProcessIds)
+    Write-BridgeRestartLog -Event "process.restart.workbuddy_stop_all" -Message "Stopping current user's WorkBuddy processes." -Details @{
+        processIds = $processIds
+    }
+
+    foreach ($targetPid in $processIds) {
+        Stop-ProcessTreeMember -ProcessId $targetPid -AllowedNames @("workbuddy")
+    }
+
+    for ($i = 0; $i -lt 20; $i++) {
+        if (@(Get-CurrentUserWorkBuddyProcessIds).Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
 }
 
 function Build-StartupArgumentList {
@@ -220,7 +240,7 @@ Write-BridgeRestartLog -Event "restart_helper.start" -Message "Restart helper st
     relaunchShell = $RelaunchShell
 }
 
-Stop-WorkBuddyInstance -ProcessId $WorkBuddyPid -Port $CdpPort
+Stop-CurrentUserWorkBuddyProcesses
 Stop-ProcessTreeMember -ProcessId $CurrentBridgePid -AllowedNames @("node")
 Stop-ProcessTreeMember -ProcessId $LauncherPid -AllowedNames @("powershell", "pwsh")
 
