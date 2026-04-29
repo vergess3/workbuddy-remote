@@ -291,36 +291,65 @@ function renderWorkBuddyNativeShimJs({
     });
   }
 
+  function uploadWorkspaceFile(folderPath, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const uploadId = "upload-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+      const request = new XMLHttpRequest();
+      const params = new URLSearchParams({
+        folderPath,
+        fileName: file.name,
+        uploadId,
+      });
+      const cleanup = () => pendingUploadProgress.delete(uploadId);
+
+      pendingUploadProgress.set(uploadId, (message) => {
+        onProgress?.(Math.min(file.size, Number(message.loadedBytes) || 0));
+      });
+      request.open("POST", "/bridge/workspace-files?" + params.toString());
+      request.responseType = "json";
+      request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      request.upload.onprogress = (event) => {
+        onProgress?.(Math.min(file.size, Number(event.loaded) || 0));
+      };
+      request.onload = () => {
+        cleanup();
+        if (request.status < 200 || request.status >= 300) {
+          reject(new Error("Failed to upload file"));
+          return;
+        }
+        const result = request.response;
+        if (!result?.ok) {
+          reject(new Error(result?.error || "Upload failed"));
+          return;
+        }
+        onProgress?.(file.size);
+        resolve(result);
+      };
+      request.onerror = () => {
+        cleanup();
+        reject(new Error("Failed to upload file"));
+      };
+      request.send(file);
+    });
+  }
+
   async function uploadWorkspaceFiles(folderPath, files, onProgress) {
     await connect();
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
     let completedBytes = 0;
     const uploaded = [];
     for (const file of files) {
-      const uploadId = "upload-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-      pendingUploadProgress.set(uploadId, (message) => {
+      const result = await uploadWorkspaceFile(folderPath, file, (loadedBytes) => {
         onProgress?.({
-          loadedBytes: completedBytes + (message.loadedBytes || 0),
-          totalBytes: files.reduce((sum, item) => sum + item.size, 0),
+          loadedBytes: completedBytes + loadedBytes,
+          totalBytes,
         });
       });
-      try {
-        const result = await fetchJson(
-          "/bridge/workspace-files?folderPath=" + encodeURIComponent(folderPath) +
-            "&fileName=" + encodeURIComponent(file.name) +
-            "&uploadId=" + encodeURIComponent(uploadId),
-          { method: "POST", body: file }
-        );
-        if (!result?.ok) {
-          throw new Error(result?.error || "Upload failed");
-        }
-        uploaded.push(result);
-      } finally {
-        pendingUploadProgress.delete(uploadId);
-      }
+      uploaded.push(result);
       completedBytes += file.size;
       onProgress?.({
         loadedBytes: completedBytes,
-        totalBytes: files.reduce((sum, item) => sum + item.size, 0),
+        totalBytes,
       });
     }
     return uploaded;
@@ -328,24 +357,39 @@ function renderWorkBuddyNativeShimJs({
 
   function createUploadProgressControl() {
     const element = document.createElement("div");
-    element.style.cssText = "display:none;font-size:12px;color:#9aa4c7;";
+    element.style.cssText = "display:none;gap:6px;flex-direction:column;";
+
+    const text = document.createElement("div");
+    text.style.cssText = "font-size:12px;color:#9aa4c7;";
+    element.appendChild(text);
+
+    const track = document.createElement("div");
+    track.style.cssText = "height:6px;border-radius:999px;background:#202842;overflow:hidden;";
+    element.appendChild(track);
+
+    const bar = document.createElement("div");
+    bar.style.cssText = "height:100%;width:0%;background:#31c48d;";
+    track.appendChild(bar);
+
     return {
       element,
       set(progress) {
-        if (!progress) {
+        if (!progress || !progress.totalBytes) {
           element.style.display = "none";
-          element.textContent = "";
+          text.textContent = "";
+          bar.style.width = "0%";
           return;
         }
         const total = Math.max(0, Number(progress.totalBytes) || 0);
         const loaded = Math.max(0, Number(progress.loadedBytes) || 0);
         const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-        element.textContent = t("uploadProgress", {
+        element.style.display = "flex";
+        text.textContent = t("uploadProgress", {
           percent,
           loaded: formatFileSize(loaded),
           total: formatFileSize(total),
         });
-        element.style.display = "block";
+        bar.style.width = percent + "%";
       },
     };
   }
@@ -472,6 +516,20 @@ function renderWorkBuddyNativeShimJs({
     } catch {
       return "";
     }
+  }
+
+  async function resolveFileManagerTargetPath(targetPath = "") {
+    const normalizedTargetPath = normalizeLocalPathInput(targetPath);
+    if (normalizedTargetPath && isLocalPathLike(normalizedTargetPath)) {
+      return normalizedTargetPath;
+    }
+
+    const currentWorkspacePath = normalizeLocalPathInput(await getCurrentWorkspacePath());
+    if (normalizedTargetPath && currentWorkspacePath && isRelativePathLike(normalizedTargetPath)) {
+      return joinWindowsPath(currentWorkspacePath, normalizedTargetPath);
+    }
+
+    return currentWorkspacePath || normalizedTargetPath;
   }
 
   function replacePathCandidateInArgs(args, folderPath) {
@@ -921,7 +979,7 @@ function renderWorkBuddyNativeShimJs({
     }
 
     const roots = await fetchWorkspaceRoots();
-    const preferredTargetPath = normalizeLocalPathInput(options?.targetPath);
+    const preferredTargetPath = await resolveFileManagerTargetPath(options?.targetPath);
 
     return new Promise((resolve, reject) => {
       let selectedRoot = "";
@@ -1004,7 +1062,7 @@ function renderWorkBuddyNativeShimJs({
       body.appendChild(workspaceHint);
 
       const uploadRow = document.createElement("div");
-      uploadRow.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:12px;align-items:start;";
+      uploadRow.style.cssText = "display:block;";
       body.appendChild(uploadRow);
       const uploadField = document.createElement("label");
       uploadField.style.cssText = "display:flex;flex-direction:column;gap:6px;";
@@ -1029,11 +1087,6 @@ function renderWorkBuddyNativeShimJs({
       uploadField.appendChild(uploadHint);
       const uploadProgress = createUploadProgressControl();
       uploadField.appendChild(uploadProgress.element);
-      const uploadButton = document.createElement("button");
-      uploadButton.type = "button";
-      uploadButton.textContent = t("upload");
-      uploadButton.style.cssText = "margin-top:24px;height:88px;padding:0 8px;border:none;border-radius:12px;background:#31c48d;color:#062b1f;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.2;";
-      uploadRow.appendChild(uploadButton);
 
       const fileList = document.createElement("div");
       fileList.style.cssText = "min-height:280px;max-height:420px;overflow:auto;border:1px solid #2c3350;border-radius:12px;background:#0d1120;padding:8px;display:flex;flex-direction:column;gap:8px;";
@@ -1156,8 +1209,7 @@ function renderWorkBuddyNativeShimJs({
         refreshButton.disabled = loadingFolders || loadingFiles || !selectedRoot;
         uploadInput.disabled = loadingFolders || loadingFiles || !selectedWorkspacePath;
         dropZone.disabled = loadingFolders || loadingFiles || !selectedWorkspacePath;
-        uploadButton.disabled = loadingFolders || loadingFiles || !selectedWorkspacePath || queuedUploadFiles.length === 0;
-        uploadButton.style.opacity = uploadButton.disabled ? ".55" : "1";
+        dropZone.style.opacity = dropZone.disabled ? ".55" : "1";
       };
 
       const updateQueuedUploadFiles = (nextFiles) => {
@@ -1173,6 +1225,37 @@ function renderWorkBuddyNativeShimJs({
           dropZone.textContent = t("selectedFilesHint");
         }
         setBusy();
+      };
+
+      const uploadQueuedFiles = async () => {
+        if (!selectedWorkspacePath) {
+          window.alert(t("selectWorkspaceFirst"));
+          return;
+        }
+        const selectedFiles = [...queuedUploadFiles];
+        if (selectedFiles.length === 0) {
+          return;
+        }
+        loadingFiles = true;
+        setBusy();
+        uploadProgress.set({
+          loadedBytes: 0,
+          totalBytes: selectedFiles.reduce((sum, file) => sum + file.size, 0),
+        });
+        try {
+          await uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles, uploadProgress.set);
+          const names = selectedFiles.map((file) => file.name).join(", ");
+          showBridgeToast(t("uploadComplete", { names, workspace: selectedWorkspacePath }));
+          uploadInput.value = "";
+          updateQueuedUploadFiles([]);
+          await loadFilesForWorkspace(selectedWorkspacePath);
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : String(error));
+        } finally {
+          loadingFiles = false;
+          uploadProgress.set(null);
+          setBusy();
+        }
       };
 
       const loadFilesForWorkspace = async (folderPath) => {
@@ -1275,7 +1358,10 @@ function renderWorkBuddyNativeShimJs({
       refreshButton.addEventListener("click", () => {
         loadFoldersForRoot(rootSelect.value, selectedWorkspacePath).catch(fail);
       });
-      uploadInput.addEventListener("change", () => updateQueuedUploadFiles(uploadInput.files || []));
+      uploadInput.addEventListener("change", () => {
+        updateQueuedUploadFiles(uploadInput.files || []);
+        uploadQueuedFiles();
+      });
       dropZone.addEventListener("click", () => {
         if (!dropZone.disabled) {
           uploadInput.click();
@@ -1304,35 +1390,7 @@ function renderWorkBuddyNativeShimJs({
         setDropActive(false);
         if (!dropZone.disabled) {
           updateQueuedUploadFiles(event.dataTransfer?.files || []);
-        }
-      });
-      uploadButton.addEventListener("click", async () => {
-        if (!selectedWorkspacePath) {
-          window.alert(t("selectWorkspaceFirst"));
-          return;
-        }
-        const selectedFiles = [...queuedUploadFiles];
-        if (selectedFiles.length === 0) {
-          window.alert(t("chooseFilesFirst"));
-          return;
-        }
-        loadingFiles = true;
-        setBusy();
-        uploadProgress.set({
-          loadedBytes: 0,
-          totalBytes: selectedFiles.reduce((sum, file) => sum + file.size, 0),
-        });
-        try {
-          await uploadWorkspaceFiles(selectedWorkspacePath, selectedFiles, uploadProgress.set);
-          uploadInput.value = "";
-          updateQueuedUploadFiles([]);
-          await loadFilesForWorkspace(selectedWorkspacePath);
-        } catch (error) {
-          window.alert(error instanceof Error ? error.message : String(error));
-        } finally {
-          loadingFiles = false;
-          uploadProgress.set(null);
-          setBusy();
+          uploadQueuedFiles();
         }
       });
       closeButton.addEventListener("click", finish);
@@ -1438,10 +1496,18 @@ function renderWorkBuddyNativeShimJs({
       control?.getAttribute?.("data-testid"),
       control?.getAttribute?.("data-action"),
       control?.getAttribute?.("data-addition-id"),
+      control?.className,
     ]
       .map((value) => String(value || "").replace(/\\s+/g, " ").trim())
       .filter(Boolean)
       .join(" ");
+  }
+
+  function isOpenFileManagerControlLabel(label) {
+    if (/(本地文件|上传|附件|添加文件|upload|attach|add.*file|local.*file)/iu.test(label)) {
+      return false;
+    }
+    return /打开.*(文件夹|目录|文件)|在.*(文件管理器|资源管理器).*显示|文件管理器中显示|资源管理器中显示|open.*(folder|file)|show.*(folder|file)|reveal.*(explorer|folder|file)|folder.*open|file.*open/iu.test(label);
   }
 
   function getControlLocalPath(control) {
@@ -1453,7 +1519,16 @@ function renderWorkBuddyNativeShimJs({
       control?.getAttribute?.("data-target-path"),
       control?.getAttribute?.("data-uri"),
     ];
-    return candidates.find((value) => isLocalPathLike(value)) || "";
+    const localPath = candidates.find((value) => isLocalPathLike(value));
+    if (localPath) {
+      return localPath;
+    }
+    return [
+      control?.getAttribute?.("data-path"),
+      control?.getAttribute?.("data-file-path"),
+      control?.getAttribute?.("data-target-path"),
+      control?.getAttribute?.("data-uri"),
+    ].find((value) => isRelativePathLike(value)) || "";
   }
 
   async function handleDomCommand(control) {
@@ -1463,13 +1538,16 @@ function renderWorkBuddyNativeShimJs({
 
     const label = getControlLabel(control);
     const localPath = getControlLocalPath(control);
-    if (localPath && /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label)) {
+    if (isOpenFileManagerControlLabel(label)) {
       await openWorkspaceFileManagerOnce({ targetPath: localPath });
       return true;
     }
 
     return false;
   }
+
+  const domCommandDocuments = new WeakSet();
+  let domCommandObserver = null;
 
   function installDomCommandInterceptors() {
     const handler = (event) => {
@@ -1481,9 +1559,7 @@ function renderWorkBuddyNativeShimJs({
         return;
       }
       const label = getControlLabel(control);
-      const shouldHandle =
-        /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label);
-      if (!shouldHandle) {
+      if (!isOpenFileManagerControlLabel(label)) {
         return;
       }
       event.preventDefault();
@@ -1495,8 +1571,32 @@ function renderWorkBuddyNativeShimJs({
       });
     };
 
-    for (const type of ["pointerdown", "mousedown", "click"]) {
-      document.addEventListener(type, handler, true);
+    const installForDocument = (targetDocument) => {
+      if (!targetDocument || domCommandDocuments.has(targetDocument)) {
+        return;
+      }
+      domCommandDocuments.add(targetDocument);
+      for (const type of ["pointerdown", "mousedown", "click"]) {
+        targetDocument.addEventListener(type, handler, true);
+      }
+    };
+
+    const installForKnownDocuments = () => {
+      installForDocument(document);
+      for (const frame of document.querySelectorAll("iframe")) {
+        try {
+          installForDocument(frame.contentDocument);
+        } catch {}
+      }
+    };
+
+    installForKnownDocuments();
+    if (!domCommandObserver) {
+      domCommandObserver = new MutationObserver(installForKnownDocuments);
+      domCommandObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
     }
 
     const nativeWindowOpen = window.open.bind(window);
