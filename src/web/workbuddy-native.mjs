@@ -46,7 +46,7 @@ function renderWorkBuddyNativeHtml(sourceHtml) {
   }
   html = html.replace(
     /\b(src|href)=(["']\.\/assets\/(?:index|setting)-[\w-]+\.js)(["'])/gu,
-    '$1=$2?wb-remote-patch=4$3'
+    '$1=$2?wb-remote-patch=5$3'
   );
   return html;
 }
@@ -2577,6 +2577,18 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function callWorkBuddyRemoteSidebarToggle(nextOpenState = null) {
+    if (nextOpenState !== null && typeof globalThis.__workbuddyRemoteSetSidebarOpen === "function") {
+      try {
+        if (globalThis.__workbuddyRemoteSetSidebarOpen(Boolean(nextOpenState)) !== false) {
+          rememberMobileSidebarState(Boolean(nextOpenState));
+          mobileNavigationAssist.lastActivationAt = Date.now();
+          scheduleMobileNavigationRefresh();
+          return true;
+        }
+      } catch (error) {
+        console.warn("[workbuddy-remote] Failed to set WorkBuddy sidebar state:", error);
+      }
+    }
     const toggle = globalThis.__workbuddyRemoteToggleSidebar;
     if (typeof toggle !== "function") {
       return false;
@@ -2735,14 +2747,6 @@ function renderWorkBuddyNativeShimJs({
     hitTarget.setAttribute("aria-label", "Toggle navigation");
     hitTarget.style.cssText = "position:fixed;z-index:2147483647;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;";
     applyMobileNavigationTouchHandling(hitTarget);
-    const begin = (event) => {
-      if (!isMobileTouchViewport()) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
-    };
     const activate = (event) => {
       if (!isMobileTouchViewport()) {
         return;
@@ -2750,15 +2754,15 @@ function renderWorkBuddyNativeShimJs({
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
-      if (Date.now() - mobileNavigationAssist.lastActivationAt < 350) {
+      if (Date.now() - mobileNavigationAssist.lastActivationAt < 750) {
         return;
       }
       const open = isLikelyMobileSidebarOpen();
       activateMobileNavigation(!open);
     };
-    hitTarget.addEventListener("pointerdown", begin, true);
+    hitTarget.addEventListener("pointerdown", activate, true);
     hitTarget.addEventListener("pointerup", activate, true);
-    hitTarget.addEventListener("touchstart", begin, { capture: true, passive: false });
+    hitTarget.addEventListener("touchstart", activate, { capture: true, passive: false });
     hitTarget.addEventListener("touchend", activate, { capture: true, passive: false });
     hitTarget.addEventListener("click", activate, true);
     document.body.appendChild(hitTarget);
@@ -2777,7 +2781,8 @@ function renderWorkBuddyNativeShimJs({
       const hitTarget = ensureMobileNavigationHitTarget();
       const width = getMobileNavigationOpenSwipeEdge();
       const height = Math.min(128, Math.max(92, window.innerHeight * 0.13));
-      const top = Math.max(58, Math.min(getTopApplicationMenuBottom() + 2, window.innerHeight - height));
+      const appMenuBottom = getTopApplicationMenuBottom();
+      const top = Math.max(0, Math.min(appMenuBottom > 0 ? appMenuBottom + 2 : 44, window.innerHeight - height));
       const nextStyle = {
         left: "0px",
         top: top + "px",
@@ -2850,7 +2855,7 @@ function renderWorkBuddyNativeShimJs({
     const openEdge = getMobileNavigationOpenSwipeEdge();
     const closeEdge = Math.min(420, Math.max(220, window.innerWidth * 0.82));
     const canOpen = x <= openEdge;
-    const canClose = menuOpen && x <= closeEdge;
+    const canClose = x <= closeEdge;
     mobileNavigationAssist.gesture = canOpen || canClose
       ? {
           x,

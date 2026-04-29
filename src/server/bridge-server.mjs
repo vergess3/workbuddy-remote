@@ -409,8 +409,79 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
   if (shouldPatchMainIndex) {
     const sidebarToggleExposeFrom =
       'const applySmartSpaceLayout = (0, import_react.useCallback)((options) => {';
-    const sidebarToggleExposeTo =
-      'try { globalThis.__workbuddyRemoteToggleSidebar = handleToggleSidebar; globalThis.__workbuddyRemoteGetSidebarState = () => { let drawerOpen = false; try { drawerOpen = Boolean(gridRef.current?.isDrawerOpen?.(sidebarGridViewRef.current)); } catch {} return { open: isLocalMode ? !workbuddyHidden : isNarrowForSidebar ? drawerOpen : sidebarExpanded, collapsed: isLocalMode ? workbuddyHidden : !sidebarExpanded, narrow: isNarrowForSidebar, local: isLocalMode }; }; } catch {} const applySmartSpaceLayout = (0, import_react.useCallback)((options) => {';
+    const sidebarToggleExposeTo = `try {
+      const __workbuddyRemoteAnimateSidebar = () => {
+        const gridEl = gridRef.current?.element ?? document.querySelector(".teams-container");
+        if (gridEl) {
+          gridEl.classList.add("sidebar-animating");
+          setTimeout(() => gridEl.classList.remove("sidebar-animating"), 300);
+        }
+      };
+      const __workbuddyRemoteDrawerConfig = () => ({
+        placement: "left",
+        size: SIDEBAR_SIZE.EXPANDED_WIDTH,
+        showBackdrop: true,
+        animationDuration: 300
+      });
+      globalThis.__workbuddyRemoteSetSidebarOpen = (open) => {
+        const nextOpen = Boolean(open);
+        const grid = gridRef.current;
+        const view = sidebarGridViewRef.current;
+        if (!grid || !view) return false;
+        if (isLocalMode) {
+          __workbuddyRemoteAnimateSidebar();
+          if (nextOpen) {
+            view.minimumWidth = SIDEBAR_SIZE.EXPANDED_WIDTH;
+            view.maximumWidth = SIDEBAR_SIZE.EXPANDED_WIDTH;
+            grid.setViewVisible(view, true);
+            setSidebarExpanded(true);
+            setWorkbuddyHidden(false);
+          } else {
+            grid.setViewVisible(view, false);
+            setWorkbuddyHidden(true);
+          }
+          try { localStorage.setItem(SIDEBAR_STORAGE_KEY, String(nextOpen)); } catch {}
+          return true;
+        }
+        if (isNarrowForSidebar) {
+          if (nextOpen) {
+            if (isNarrowForDetail && detailPanelViewRef.current) {
+              try {
+                if (grid.isDrawerOpen?.(detailPanelViewRef.current)) grid.closeDrawer(detailPanelViewRef.current);
+              } catch {}
+            }
+            if (typeof grid.openDrawer === "function") {
+              grid.openDrawer(view, __workbuddyRemoteDrawerConfig());
+            } else if (typeof grid.toggleDrawer === "function" && !grid.isDrawerOpen?.(view)) {
+              grid.toggleDrawer(view, __workbuddyRemoteDrawerConfig());
+            }
+          } else if (typeof grid.closeDrawer === "function") {
+            try { grid.closeDrawer(view); } catch {}
+          }
+          return true;
+        }
+        __workbuddyRemoteAnimateSidebar();
+        if (nextOpen && !canExpandSidebar()) return false;
+        userWantsSidebarExpandedRef.current = nextOpen;
+        isAutoCollapsedRef.current = false;
+        try { localStorage.setItem(SIDEBAR_STORAGE_KEY, String(nextOpen)); } catch {}
+        setSidebarExpanded(nextOpen);
+        return true;
+      };
+      globalThis.__workbuddyRemoteOpenSidebar = () => globalThis.__workbuddyRemoteSetSidebarOpen(true);
+      globalThis.__workbuddyRemoteCloseSidebar = () => globalThis.__workbuddyRemoteSetSidebarOpen(false);
+      globalThis.__workbuddyRemoteToggleSidebar = handleToggleSidebar;
+      globalThis.__workbuddyRemoteGetSidebarState = () => {
+        let drawerOpen = false;
+        try { drawerOpen = Boolean(gridRef.current?.isDrawerOpen?.(sidebarGridViewRef.current)); } catch {}
+        return {
+          open: isLocalMode ? !workbuddyHidden : isNarrowForSidebar ? drawerOpen : sidebarExpanded,
+          collapsed: isLocalMode ? workbuddyHidden : !sidebarExpanded,
+          narrow: isNarrowForSidebar,
+          local: isLocalMode
+        };
+      };
+    } catch {} const applySmartSpaceLayout = (0, import_react.useCallback)((options) => {`;
     if (patched.includes(sidebarToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleSidebar")) {
       patched = patched.replace(sidebarToggleExposeFrom, sidebarToggleExposeTo);
     }
