@@ -2259,295 +2259,6 @@ function renderWorkBuddyNativeShimJs({
     ));
   }
 
-  function getVisibleElementRect(element) {
-    const rect = element?.getBoundingClientRect?.();
-    if (!rect || rect.width <= 0 || rect.height <= 0) {
-      return null;
-    }
-    const style = window.getComputedStyle(element);
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      Number(style.opacity) === 0
-    ) {
-      return null;
-    }
-    return rect;
-  }
-
-  function getClickableControl(element) {
-    if (!element?.closest) {
-      return null;
-    }
-    const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
-    if (!control || control.closest?.("[id^='wb-bridge-']")) {
-      return null;
-    }
-    return control;
-  }
-
-  function isLikelyWindowControlLabel(label) {
-    return /(minimi[sz]e|maximi[sz]e|restore|close|最小化|最大化|还原|关闭)/iu.test(label);
-  }
-
-  function getDirectControlText(control) {
-    return String(control?.textContent || "").replace(/\\s+/g, " ").trim();
-  }
-
-  function isTopApplicationMenuControl(control) {
-    const text = getDirectControlText(control);
-    const label = getControlLabel(control);
-    if (/^(?:workbuddy|edit(?:\\([a-z]\\))?|window(?:\\([a-z]\\))?|help(?:\\([a-z]\\))?|编辑(?:\\([a-z]\\))?|窗口(?:\\([a-z]\\))?|帮助(?:\\([a-z]\\))?)$/iu.test(text)) {
-      return true;
-    }
-    return /^(?:workbuddy|edit|window|help|编辑|窗口|帮助)(?:\\s|\\(|$)/iu.test(label.trim());
-  }
-
-  function getTopApplicationMenuBottom() {
-    let bottom = 0;
-    const viewportLimit = Math.min(150, Math.max(72, window.innerHeight * 0.16));
-    const candidates = new Set(document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex]"));
-    for (const element of document.querySelectorAll("div,span")) {
-      if (/^(?:workbuddy|edit(?:\\([a-z]\\))?|window(?:\\([a-z]\\))?|help(?:\\([a-z]\\))?|编辑(?:\\([a-z]\\))?|窗口(?:\\([a-z]\\))?|帮助(?:\\([a-z]\\))?)$/iu.test(getDirectControlText(element))) {
-        candidates.add(element);
-      }
-    }
-    for (const control of candidates) {
-      if (!isTopApplicationMenuControl(control)) {
-        continue;
-      }
-      const rect = getVisibleElementRect(control);
-      if (
-        rect &&
-        rect.top <= viewportLimit &&
-        rect.left <= window.innerWidth * 0.72 &&
-        rect.height <= 96
-      ) {
-        bottom = Math.max(bottom, rect.bottom);
-      }
-    }
-    return bottom;
-  }
-
-  function getMobileMenuSearchBounds() {
-    const minY = Math.min(
-      220,
-      Math.max(76, window.innerHeight * 0.085, getTopApplicationMenuBottom() + 4)
-    );
-    return {
-      x: Math.min(156, Math.max(104, window.innerWidth * 0.22)),
-      minY,
-      y: Math.min(300, Math.max(150, window.innerHeight * 0.28)),
-    };
-  }
-
-  function scoreMobileNavigationToggle(control, hitCount = 0) {
-    if (!control || control.closest?.("[id^='wb-bridge-']")) {
-      return -1;
-    }
-    const rect = getVisibleElementRect(control);
-    const bounds = getMobileMenuSearchBounds();
-    if (
-      !rect ||
-      rect.left < -8 ||
-      rect.left > bounds.x ||
-      rect.top < bounds.minY ||
-      rect.top > bounds.y ||
-      rect.width < 18 ||
-      rect.height < 18 ||
-      rect.width > 132 ||
-      rect.height > 132
-    ) {
-      return -1;
-    }
-
-    const label = getControlLabel(control).toLowerCase();
-    if (isLikelyWindowControlLabel(label) || isTopApplicationMenuControl(control)) {
-      return -1;
-    }
-    const text = String(control.textContent || "");
-    const className = String(control.className || "").toLowerCase();
-    const hasMenuLabel = /(menu|sidebar|history|session|conversation|task|nav|drawer|菜单|侧栏|历史|会话|对话|任务|展开|折叠)/u.test(label + " " + className);
-    const hasMenuGlyph = /[☰≡]/u.test(text);
-    const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
-    const isCompact = rect.width <= 88 && rect.height <= 88;
-    const isSquareish = Math.abs(rect.width - rect.height) <= Math.max(16, Math.min(rect.width, rect.height) * 0.65);
-    const longText = text.replace(/\\s+/g, "").length > 4;
-    if (longText && !hasSvg && !hasMenuLabel && !hasMenuGlyph) {
-      return -1;
-    }
-
-    let score = hitCount * 7;
-    if (hasMenuLabel) score += 22;
-    if (hasMenuGlyph) score += 22;
-    if (hasSvg) score += 12;
-    if (isCompact) score += 8;
-    if (isSquareish) score += 5;
-    if (rect.left <= 72) score += 8;
-    if (rect.top >= 36) score += 4;
-    if (longText && !hasMenuLabel && !hasMenuGlyph) score -= 18;
-    return score >= 16 ? score : -1;
-  }
-
-  function withMobileHitTargetPassthrough(callback) {
-    const hitTarget = mobileNavigationAssist.hitTarget;
-    const previousPointerEvents = hitTarget?.style?.pointerEvents;
-    if (hitTarget) {
-      hitTarget.style.pointerEvents = "none";
-    }
-    try {
-      return callback();
-    } finally {
-      if (hitTarget) {
-        hitTarget.style.pointerEvents = previousPointerEvents || "auto";
-      }
-    }
-  }
-
-  function findMobileNavigationToggleCandidate() {
-    return withMobileHitTargetPassthrough(() => {
-      const bounds = getMobileMenuSearchBounds();
-      const hitCounts = new Map();
-      const sampleXs = [16, 28, 40, 56, 72, 92].filter((x) => x <= bounds.x);
-      const sampleStep = 10;
-      for (const x of sampleXs) {
-        for (let y = bounds.minY; y <= bounds.y; y += sampleStep) {
-          const control = getClickableControl(document.elementFromPoint(x, y));
-          if (control) {
-            hitCounts.set(control, (hitCounts.get(control) || 0) + 1);
-          }
-        }
-      }
-
-      const candidates = new Set(hitCounts.keys());
-      for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]")) {
-        candidates.add(control);
-      }
-
-      let best = null;
-      let bestScore = -1;
-      for (const control of candidates) {
-        const score = scoreMobileNavigationToggle(control, hitCounts.get(control) || 0);
-        if (score > bestScore) {
-          best = control;
-          bestScore = score;
-        }
-      }
-      return best;
-    });
-  }
-
-  function findMobileNavigationCloseCandidate() {
-    const maxX = Math.min(360, window.innerWidth * 0.88);
-    const maxY = Math.min(280, window.innerHeight * 0.34);
-    let best = null;
-    let bestScore = -1;
-    for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]")) {
-      if (control.closest?.("[id^='wb-bridge-']")) {
-        continue;
-      }
-      const rect = getVisibleElementRect(control);
-      if (!rect || rect.left < -8 || rect.left > maxX || rect.top < 0 || rect.top > maxY || rect.width > 140 || rect.height > 140) {
-        continue;
-      }
-      const label = getControlLabel(control).toLowerCase();
-      const text = String(control.textContent || "");
-      const className = String(control.className || "").toLowerCase();
-      const hasCloseCue = /(close|collapse|hide|sidebar|drawer|menu|关闭|收起|折叠|侧栏|菜单)/u.test(label + " " + className) || /[×✕✖☰≡]/u.test(text);
-      const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
-      if (!hasCloseCue && !hasSvg) {
-        continue;
-      }
-      let score = 0;
-      if (/(close|关闭|收起|折叠)/u.test(label + " " + className)) score += 28;
-      if (/(sidebar|drawer|menu|侧栏|菜单)/u.test(label + " " + className)) score += 18;
-      if (/[×✕✖☰≡]/u.test(text)) score += 18;
-      if (hasSvg) score += 8;
-      if (rect.left <= 96) score += 8;
-      if (rect.width <= 88 && rect.height <= 88) score += 6;
-      if (score > bestScore) {
-        best = control;
-        bestScore = score;
-      }
-    }
-    return best;
-  }
-
-  function readMobileNavigationToggleState(control) {
-    const owner = control?.closest?.("[aria-expanded],[aria-pressed],[data-state],[data-open]") || control;
-    const values = [
-      control?.getAttribute?.("aria-expanded"),
-      control?.getAttribute?.("aria-pressed"),
-      control?.getAttribute?.("data-state"),
-      control?.getAttribute?.("data-open"),
-      owner?.getAttribute?.("aria-expanded"),
-      owner?.getAttribute?.("aria-pressed"),
-      owner?.getAttribute?.("data-state"),
-      owner?.getAttribute?.("data-open"),
-    ]
-      .map((value) => String(value || "").trim().toLowerCase())
-      .filter(Boolean);
-    if (values.some((value) => value === "true" || value === "open" || value === "expanded")) {
-      return true;
-    }
-    if (values.some((value) => value === "false" || value === "closed" || value === "collapsed")) {
-      return false;
-    }
-    return null;
-  }
-
-  function isLikelyMobileSidebarOpen() {
-    const viewportWidth = window.innerWidth || 0;
-    const viewportHeight = window.innerHeight || 0;
-    const selector = [
-      "aside",
-      "nav",
-      "[role='navigation']",
-      "[role='dialog']",
-      "[data-state='open']",
-      "[aria-modal='true']",
-      "[class]",
-    ].join(",");
-
-    for (const element of document.querySelectorAll(selector)) {
-      if (element.closest?.("[id^='wb-bridge-']")) {
-        continue;
-      }
-      const tagName = String(element.tagName || "").toLowerCase();
-      const role = String(element.getAttribute?.("role") || "").toLowerCase();
-      const state = String(element.getAttribute?.("data-state") || "").toLowerCase();
-      const className = String(element.className || "").toLowerCase();
-      const hasStrongPanelCue =
-        tagName === "aside" ||
-        role === "navigation" ||
-        role === "dialog" ||
-        state === "open" ||
-        element.getAttribute?.("aria-modal") === "true" ||
-        /(sidebar|drawer|history|session|conversation|task)/u.test(className);
-      const hasWeakPanelCue = tagName === "nav" || /(menu|nav)/u.test(className);
-      if (!hasStrongPanelCue && !hasWeakPanelCue) {
-        continue;
-      }
-      const rect = getVisibleElementRect(element);
-      if (!rect) {
-        continue;
-      }
-      const style = window.getComputedStyle(element);
-      const layered = ["fixed", "absolute", "sticky"].includes(style.position) || Number(style.zIndex) > 0;
-      if (
-        rect.left <= 18 &&
-        rect.right >= Math.min(150, viewportWidth * 0.38) &&
-        rect.width >= Math.min(150, viewportWidth * 0.42) &&
-        rect.width <= viewportWidth * (hasStrongPanelCue ? 1.02 : 0.94) &&
-        rect.height >= viewportHeight * 0.45 &&
-        (layered || rect.top <= 80)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   function rememberMobileSidebarState(isOpen) {
     mobileNavigationAssist.lastKnownOpen = Boolean(isOpen);
     mobileNavigationAssist.lastKnownOpenAt = Date.now();
@@ -2577,12 +2288,24 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function callWorkBuddyRemoteSidebarToggle(nextOpenState = null) {
+    const desiredOpen = nextOpenState === null ? !getMobileSidebarOpenState() : Boolean(nextOpenState);
     if (nextOpenState !== null && typeof globalThis.__workbuddyRemoteSetSidebarOpen === "function") {
       try {
-        if (globalThis.__workbuddyRemoteSetSidebarOpen(Boolean(nextOpenState)) !== false) {
-          rememberMobileSidebarState(Boolean(nextOpenState));
+        if (globalThis.__workbuddyRemoteSetSidebarOpen(desiredOpen) !== false) {
+          rememberMobileSidebarState(desiredOpen);
           mobileNavigationAssist.lastActivationAt = Date.now();
-          scheduleMobileNavigationRefresh();
+          return true;
+        }
+      } catch (error) {
+        console.warn("[workbuddy-remote] Failed to set WorkBuddy sidebar state:", error);
+      }
+    }
+    const direct = desiredOpen ? globalThis.__workbuddyRemoteOpenSidebar : globalThis.__workbuddyRemoteCloseSidebar;
+    if (typeof direct === "function") {
+      try {
+        if (direct() !== false) {
+          rememberMobileSidebarState(desiredOpen);
+          mobileNavigationAssist.lastActivationAt = Date.now();
           return true;
         }
       } catch (error) {
@@ -2593,22 +2316,13 @@ function renderWorkBuddyNativeShimJs({
     if (typeof toggle !== "function") {
       return false;
     }
-    const visualOpen = isLikelyMobileSidebarOpen();
-    const rememberedState = getRememberedMobileSidebarState(45000);
-    const currentState = readNativeMobileSidebarState();
-    if (nextOpenState === true && visualOpen) {
-      return true;
-    }
-    if (nextOpenState === false && !visualOpen && rememberedState === false) {
+    if (getMobileSidebarOpenState() === desiredOpen) {
       return true;
     }
     try {
       toggle();
-      const reliableCurrentOpen = visualOpen || rememberedState === true || Boolean(currentState?.open && rememberedState !== false);
-      const expectedOpen = nextOpenState === null ? !reliableCurrentOpen : Boolean(nextOpenState);
-      rememberMobileSidebarState(expectedOpen);
+      rememberMobileSidebarState(desiredOpen);
       mobileNavigationAssist.lastActivationAt = Date.now();
-      scheduleMobileNavigationRefresh();
       return true;
     } catch (error) {
       console.warn("[workbuddy-remote] Failed to toggle WorkBuddy sidebar:", error);
@@ -2616,20 +2330,7 @@ function renderWorkBuddyNativeShimJs({
     }
   }
 
-  function getMobileSidebarOpenState(control = mobileNavigationAssist.lastToggle) {
-    const toggleState = readMobileNavigationToggleState(control);
-    if (toggleState === true) {
-      rememberMobileSidebarState(true);
-      return true;
-    }
-    if (isLikelyMobileSidebarOpen()) {
-      rememberMobileSidebarState(true);
-      return true;
-    }
-    if (toggleState === false) {
-      rememberMobileSidebarState(false);
-      return false;
-    }
+  function getMobileSidebarOpenState() {
     const rememberedState = getRememberedMobileSidebarState();
     if (rememberedState !== null) {
       return rememberedState;
@@ -2638,69 +2339,11 @@ function renderWorkBuddyNativeShimJs({
     if (nativeState) {
       return nativeState.open;
     }
-    rememberMobileSidebarState(false);
     return false;
   }
 
-  function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
-    const eventInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: window,
-      clientX,
-      clientY,
-      screenX: window.screenX + clientX,
-      screenY: window.screenY + clientY,
-      button: 0,
-      buttons: 1,
-    };
-    const dispatch = (type, EventConstructor, init = eventInit) => {
-      try {
-        control.dispatchEvent(new EventConstructor(type, init));
-      } catch {
-        control.dispatchEvent(new MouseEvent(type, eventInit));
-      }
-    };
-    if (typeof PointerEvent !== "undefined") {
-      dispatch("pointerdown", PointerEvent, { ...eventInit, pointerId: 1, pointerType: "touch", isPrimary: true });
-    }
-    dispatch("mousedown", MouseEvent);
-    if (typeof PointerEvent !== "undefined") {
-      dispatch("pointerup", PointerEvent, { ...eventInit, buttons: 0, pointerId: 1, pointerType: "touch", isPrimary: true });
-    }
-    dispatch("mouseup", MouseEvent, { ...eventInit, buttons: 0 });
-    dispatch("click", MouseEvent, { ...eventInit, buttons: 0, detail: 1 });
-  }
-
-  function activateMobileNavigationControl(control, nextOpenState = null) {
-    const target = control?.isConnected ? control : findMobileNavigationToggleCandidate();
-    if (!target) {
-      return false;
-    }
-    mobileNavigationAssist.lastToggle = target;
-    applyMobileNavigationTouchHandling(target);
-    const wasOpen = getMobileSidebarOpenState(target);
-    const rect = getVisibleElementRect(target);
-    const clientX = rect ? rect.left + rect.width / 2 : 32;
-    const clientY = rect ? rect.top + rect.height / 2 : 96;
-    dispatchSyntheticPointerMouseClick(target, clientX, clientY);
-    rememberMobileSidebarState(nextOpenState === null ? !wasOpen : nextOpenState);
-    mobileNavigationAssist.lastActivationAt = Date.now();
-    scheduleMobileNavigationRefresh();
-    return true;
-  }
-
   function activateMobileNavigation(nextOpenState = null) {
-    if (callWorkBuddyRemoteSidebarToggle(nextOpenState)) {
-      return true;
-    }
-    const preferClose = nextOpenState === false;
-    const control =
-      (preferClose ? findMobileNavigationCloseCandidate() : null) ||
-      findMobileNavigationToggleCandidate() ||
-      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
-    return activateMobileNavigationControl(control, nextOpenState);
+    return callWorkBuddyRemoteSidebarToggle(nextOpenState);
   }
 
   function ensureMobileNavigationStyleSheet() {
@@ -2790,20 +2433,6 @@ function renderWorkBuddyNativeShimJs({
       if (hitTarget.style[name] !== value) {
         hitTarget.style[name] = value;
       }
-    }
-    if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
-      return;
-    }
-    const control = findMobileNavigationToggleCandidate() ||
-      (mobileNavigationAssist.lastToggle?.isConnected ? mobileNavigationAssist.lastToggle : null);
-    if (!control) {
-      return;
-    }
-    mobileNavigationAssist.lastToggle = control;
-    applyMobileNavigationTouchHandling(control);
-    const rect = getVisibleElementRect(control);
-    if (!rect) {
-      return;
     }
   }
 
@@ -2952,17 +2581,6 @@ function renderWorkBuddyNativeShimJs({
 
     window.addEventListener("resize", scheduleMobileNavigationRefresh, { passive: true });
     window.addEventListener("orientationchange", scheduleMobileNavigationRefresh, { passive: true });
-    window.addEventListener("scroll", scheduleMobileNavigationRefresh, { passive: true, capture: true });
-    const observer = new MutationObserver(scheduleMobileNavigationRefresh);
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["aria-expanded", "aria-pressed", "data-state", "data-open"],
-    });
-    for (const delayMs of [100, 300, 800, 1600, 3000]) {
-      setTimeout(scheduleMobileNavigationRefresh, delayMs);
-    }
   }
 
   function isOpenFileManagerControlLabel(label) {
