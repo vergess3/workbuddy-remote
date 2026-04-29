@@ -3,6 +3,9 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 
+const WORKSPACE_ROOT_FOLDER_NAME = "WBWorkspaces";
+const NO_STORE_CACHE_CONTROL = "no-store";
+
 const DEFAULTS = {
   cdpHost: "127.0.0.1",
   cdpPort: 9333,
@@ -11,6 +14,7 @@ const DEFAULTS = {
   passwordHash: process.env.WORKBUDDY_REMOTE_PASSWORD_HASH || "",
   userDataDir: "",
   workbuddyPid: 0,
+  openBrowser: false,
   logPath: "",
 };
 
@@ -47,6 +51,9 @@ function parseArgs(argv) {
       case "--workbuddy-pid":
         options.workbuddyPid = Number(next) || 0;
         i += 1;
+        break;
+      case "--open-browser":
+        options.openBrowser = true;
         break;
       case "--log-path":
         options.logPath = next || "";
@@ -110,6 +117,20 @@ function json(res, statusCode, payload, headers = {}) {
     ...headers,
   });
   res.end(body);
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+
+  return JSON.parse(raw);
 }
 
 function text(res, statusCode, body, contentType = "text/plain; charset=utf-8", cacheControl = "no-store") {
@@ -191,14 +212,17 @@ function encodePayloadForTransport(value) {
 
 export {
   DEFAULTS,
+  NO_STORE_CACHE_CONTROL,
   WebSocket,
   WebSocketServer,
+  WORKSPACE_ROOT_FOLDER_NAME,
   contentTypeFor,
   delay,
   encodePayloadForTransport,
   getLanUrls,
   json,
   parseArgs,
+  readJsonBody,
   resolveWorkBuddyAsarPath,
   resolveWorkBuddyExePath,
   text,

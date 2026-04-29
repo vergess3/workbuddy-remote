@@ -439,6 +439,9 @@ $bridgeArgs = @(
 if ($PasswordHash) {
     $bridgeArgs += @("--password-hash", "$PasswordHash")
 }
+if ($OpenBrowser) {
+    $bridgeArgs += "--open-browser"
+}
 
 $previousWorkBuddyExePath = $env:WORKBUDDY_EXE_PATH
 $previousBridgeEventLogPath = $env:WORKBUDDY_REMOTE_EVENT_LOG_PATH

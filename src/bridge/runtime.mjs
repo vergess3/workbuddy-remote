@@ -1,5 +1,19 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { WebSocket, delay } from "../shared.mjs";
 import { logger, summarizeMessage, summarizeValue } from "../logger.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const RESTART_HELPER_SCRIPT_PATH = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "tools",
+  "workbuddy-restart-instance.ps1"
+);
 
 function unwrapTransportPayload(payload) {
   if (!payload || payload.kind === "json") {
@@ -584,6 +598,43 @@ class BridgeRuntime {
     }
   }
 
+  async getWorkBuddyLocale() {
+    try {
+      const result = await this.withCdpRecovery(() =>
+        this.cdp.evaluate(
+          `(() => {
+            const readLocale = async () => {
+              const candidates = [
+                globalThis.__WORKBUDDY_LOCALE__,
+                globalThis.__WB_APP_LOCALE__,
+                globalThis.__locale,
+                globalThis.buddyAPI?.getAppLocale ? await globalThis.buddyAPI.getAppLocale() : "",
+              ];
+              for (const candidate of candidates) {
+                if (typeof candidate === "string" && candidate.trim()) {
+                  return candidate.trim();
+                }
+                if (candidate && typeof candidate === "object") {
+                  for (const key of ["language", "locale", "current", "value"]) {
+                    if (typeof candidate[key] === "string" && candidate[key].trim()) {
+                      return candidate[key].trim();
+                    }
+                  }
+                }
+              }
+              return "";
+            };
+            return readLocale();
+          })()`
+        )
+      );
+      return typeof result === "string" ? result : "";
+    } catch (error) {
+      logger.warn("buddy_api.locale.error", "Failed to read WorkBuddy locale", { error });
+      return "";
+    }
+  }
+
   isMissingBuddyApiHandlerError(error) {
     if (!(error instanceof Error)) {
       return false;
@@ -774,6 +825,74 @@ class BridgeRuntime {
     for (const [key, entry] of subscriptions.entries()) {
       await this.decrementGlobalSubscription(key, entry.count);
     }
+  }
+
+  canRestartCurrentApp() {
+    return process.platform === "win32" && existsSync(RESTART_HELPER_SCRIPT_PATH);
+  }
+
+  async requestRestart() {
+    if (!this.canRestartCurrentApp()) {
+      throw new Error("Restart is unavailable for the current bridge session.");
+    }
+
+    const psArgs = [
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      RESTART_HELPER_SCRIPT_PATH,
+      "-CurrentBridgePid",
+      String(process.pid),
+      "-CdpPort",
+      String(this.options.cdpPort),
+      "-BridgePort",
+      String(this.options.listenPort),
+      "-UserDataDir",
+      this.options.userDataDir || "",
+      "-ListenHost",
+      this.options.listenHost || "127.0.0.1",
+      "-WorkBuddyPid",
+      String(this.options.workbuddyPid || 0),
+      "-RelaunchShell",
+      "hidden",
+    ];
+
+    if (this.options.logPath) {
+      psArgs.push("-LogPath", this.options.logPath);
+    }
+    if (this.options.passwordHash) {
+      psArgs.push("-PasswordHash", this.options.passwordHash);
+    }
+    if (this.options.openBrowser) {
+      psArgs.push("-OpenBrowser");
+    }
+
+    const quotedPsArgs = psArgs.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(", ");
+    const bootstrapArgs = [
+      "-NoProfile",
+      "-WindowStyle",
+      "Hidden",
+      "-Command",
+      `Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList @(${quotedPsArgs})`,
+    ];
+
+    logger.info("process.restart_helper.starting", "Starting restart helper", {
+      currentBridgePid: process.pid,
+      workbuddyPid: this.options.workbuddyPid,
+      cdpPort: this.options.cdpPort,
+      bridgePort: this.options.listenPort,
+    });
+
+    spawn("powershell.exe", bootstrapArgs, {
+      stdio: "ignore",
+      windowsHide: true,
+      detached: true,
+    }).unref();
+
+    return {
+      ok: true,
+      restarting: true,
+    };
   }
 
   handleBridgeNotification(params) {

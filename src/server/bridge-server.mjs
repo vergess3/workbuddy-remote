@@ -1,5 +1,6 @@
 import http from "node:http";
 import path from "node:path";
+import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import zlib from "node:zlib";
 
@@ -9,6 +10,8 @@ import {
   contentTypeFor,
   getLanUrls,
   json,
+  NO_STORE_CACHE_CONTROL,
+  readJsonBody,
   resolveWorkBuddyAsarPath,
   text,
 } from "../shared.mjs";
@@ -18,6 +21,16 @@ import {
   renderWorkBuddyNativeShimJs,
 } from "../web/workbuddy-native.mjs";
 import { createBridgeAccessAuth } from "./access-auth.mjs";
+import { loadConfig } from "../config.mjs";
+import {
+  createWorkspaceFolder,
+  deleteWorkspaceEntry,
+  listAvailableWorkspaceRoots,
+  listWorkspaceEntries,
+  listWorkspaceFolders,
+  resolveWorkspaceFilePath,
+  uploadWorkspaceFile,
+} from "../workspace/service.mjs";
 
 const HTML_CACHE_CONTROL = "no-cache";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -27,6 +40,29 @@ const MAX_COMPRESSED_STATIC_ASSET_BYTES = 32 * 1024 * 1024;
 const versionedScriptCompressionCache = new Map();
 const WORKBUDDY_ASAR_PATH = resolveWorkBuddyAsarPath();
 const workBuddyAsar = new AsarArchive(WORKBUDDY_ASAR_PATH);
+
+async function loadFeatureFlags() {
+  const config = await loadConfig();
+  return {
+    enableFileManager: config.enableFileManager !== false,
+    enableRestart: config.enableRestart !== false,
+  };
+}
+
+async function isFileManagerEnabled() {
+  return (await loadFeatureFlags()).enableFileManager;
+}
+
+async function isRestartEnabled() {
+  return (await loadFeatureFlags()).enableRestart;
+}
+
+function writeFeatureDisabled(res, featureName) {
+  json(res, 403, {
+    ok: false,
+    error: `${featureName} is disabled by config.`,
+  });
+}
 
 function isCompressibleAsset(filePath) {
   return COMPRESSIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
@@ -275,6 +311,128 @@ function createRequestHandler(runtime, auth) {
         return;
       }
 
+      if (requestUrl.pathname === "/bridge/bootstrap") {
+        const features = await loadFeatureFlags();
+        json(res, 200, {
+          ok: true,
+          hostConnected: runtime.isHostConnected(),
+          enableFileManager: features.enableFileManager,
+          restartAvailable: features.enableRestart && runtime.canRestartCurrentApp(),
+        });
+        return;
+      }
+
+      if (requestUrl.pathname === "/bridge/workspace-roots") {
+        if (!(await isFileManagerEnabled())) {
+          writeFeatureDisabled(res, "File manager");
+          return;
+        }
+        json(res, 200, {
+          ok: true,
+          roots: await listAvailableWorkspaceRoots(),
+        });
+        return;
+      }
+
+      if (requestUrl.pathname === "/bridge/workspace-folders") {
+        if (!(await isFileManagerEnabled())) {
+          writeFeatureDisabled(res, "File manager");
+          return;
+        }
+        if (req.method === "GET") {
+          const result = await listWorkspaceFolders(requestUrl.searchParams.get("rootPath"));
+          json(res, 200, {
+            ok: true,
+            ...result,
+          });
+          return;
+        }
+
+        if (req.method === "POST") {
+          const payload = await readJsonBody(req);
+          json(res, 200, await createWorkspaceFolder(payload?.rootPath, payload?.name));
+          return;
+        }
+
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+
+      if (requestUrl.pathname === "/bridge/workspace-files") {
+        if (!(await isFileManagerEnabled())) {
+          writeFeatureDisabled(res, "File manager");
+          return;
+        }
+        if (req.method === "GET") {
+          json(res, 200, await listWorkspaceEntries(requestUrl.searchParams.get("folderPath")));
+          return;
+        }
+
+        if (req.method === "POST") {
+          const uploadId = requestUrl.searchParams.get("uploadId");
+          const totalBytes = Number(req.headers["content-length"] || 0);
+          let lastProgressAt = 0;
+          const onProgress = uploadId
+            ? (loadedBytes) => {
+                const now = Date.now();
+                if (loadedBytes < totalBytes && now - lastProgressAt < 150) {
+                  return;
+                }
+                lastProgressAt = now;
+                runtime.broadcast({
+                  type: "workspace-upload-progress",
+                  uploadId,
+                  loadedBytes,
+                  totalBytes,
+                });
+              }
+            : undefined;
+
+          const result = await uploadWorkspaceFile(
+            requestUrl.searchParams.get("folderPath"),
+            requestUrl.searchParams.get("fileName"),
+            req,
+            onProgress
+          );
+          onProgress?.(totalBytes);
+          json(res, 200, result);
+          return;
+        }
+
+        if (req.method === "DELETE") {
+          const payload = await readJsonBody(req);
+          json(res, 200, await deleteWorkspaceEntry(payload?.targetPath));
+          return;
+        }
+
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+
+      if (requestUrl.pathname === "/bridge/workspace-download") {
+        if (!(await isFileManagerEnabled())) {
+          writeFeatureDisabled(res, "File manager");
+          return;
+        }
+        if (req.method !== "GET") {
+          json(res, 405, { ok: false, error: "Method not allowed" });
+          return;
+        }
+
+        const { normalizedPath, stats } = await resolveWorkspaceFilePath(
+          requestUrl.searchParams.get("targetPath")
+        );
+        const fileName = path.win32.basename(normalizedPath);
+        res.writeHead(200, {
+          "Content-Type": contentTypeFor(normalizedPath),
+          "Cache-Control": NO_STORE_CACHE_CONTROL,
+          "Content-Length": stats.size,
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        });
+        await pipeline(createReadStream(normalizedPath), res);
+        return;
+      }
+
       if (requestUrl.pathname === "/favicon.ico") {
         await sendAsarAsset(req, res, workBuddyAsar, "resources/icon.png", IMMUTABLE_CACHE_CONTROL);
         return;
@@ -302,14 +460,21 @@ function createRequestHandler(runtime, auth) {
       }
 
       if (requestUrl.pathname === "/bridge/workbuddy-native-shim.js") {
-        const [methods, version] = await Promise.all([
+        const [methods, version, locale, features] = await Promise.all([
           runtime.getBuddyApiMethods(),
           runtime.getWorkBuddyVersion(),
+          runtime.getWorkBuddyLocale(),
+          loadFeatureFlags(),
         ]);
-        sendVersionedScript(req, res, renderWorkBuddyNativeShimJs({ methods, version }), {
-          etag: `"workbuddy-native-shim-${version || "unknown"}-${methods.length}"`,
-          cacheControl: REVALIDATED_STATIC_CACHE_CONTROL,
-        });
+        sendVersionedScript(
+          req,
+          res,
+          renderWorkBuddyNativeShimJs({ methods, version, locale, ...features }),
+          {
+            etag: `"workbuddy-native-shim-${version || "unknown"}-${locale || "unknown"}-${methods.length}-${features.enableFileManager ? "files-on" : "files-off"}-${features.enableRestart ? "restart-on" : "restart-off"}"`,
+            cacheControl: REVALIDATED_STATIC_CACHE_CONTROL,
+          }
+        );
         return;
       }
 
@@ -430,6 +595,19 @@ function attachWebSocketServer(server, runtime, auth) {
             id: message.id,
             ok: true,
             result: true,
+          });
+          return;
+        }
+
+        if (message.type === "restart-app") {
+          if (!(await isRestartEnabled())) {
+            throw new Error("Restart is disabled by config.");
+          }
+          const result = await runtime.requestRestart();
+          runtime.sendToSocket(socket, {
+            id: message.id,
+            ok: true,
+            result,
           });
           return;
         }
