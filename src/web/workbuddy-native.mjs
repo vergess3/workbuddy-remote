@@ -2553,6 +2553,13 @@ function renderWorkBuddyNativeShimJs({
     mobileNavigationAssist.lastKnownOpenAt = Date.now();
   }
 
+  function getRememberedMobileSidebarState(maxAgeMs = 300000) {
+    if (Date.now() - mobileNavigationAssist.lastKnownOpenAt > maxAgeMs) {
+      return null;
+    }
+    return Boolean(mobileNavigationAssist.lastKnownOpen);
+  }
+
   function readNativeMobileSidebarState() {
     const getter = globalThis.__workbuddyRemoteGetSidebarState;
     if (typeof getter !== "function") {
@@ -2563,7 +2570,6 @@ function renderWorkBuddyNativeShimJs({
       if (!state || typeof state !== "object" || typeof state.open !== "boolean") {
         return null;
       }
-      rememberMobileSidebarState(state.open);
       return state;
     } catch {
       return null;
@@ -2575,13 +2581,19 @@ function renderWorkBuddyNativeShimJs({
     if (typeof toggle !== "function") {
       return false;
     }
+    const visualOpen = isLikelyMobileSidebarOpen();
+    const rememberedState = getRememberedMobileSidebarState(45000);
     const currentState = readNativeMobileSidebarState();
-    if (nextOpenState !== null && currentState?.open === nextOpenState) {
+    if (nextOpenState === true && visualOpen) {
+      return true;
+    }
+    if (nextOpenState === false && !visualOpen && rememberedState === false) {
       return true;
     }
     try {
       toggle();
-      const expectedOpen = nextOpenState === null ? !Boolean(currentState?.open) : Boolean(nextOpenState);
+      const reliableCurrentOpen = visualOpen || rememberedState === true || Boolean(currentState?.open && rememberedState !== false);
+      const expectedOpen = nextOpenState === null ? !reliableCurrentOpen : Boolean(nextOpenState);
       rememberMobileSidebarState(expectedOpen);
       mobileNavigationAssist.lastActivationAt = Date.now();
       scheduleMobileNavigationRefresh();
@@ -2593,10 +2605,6 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function getMobileSidebarOpenState(control = mobileNavigationAssist.lastToggle) {
-    const nativeState = readNativeMobileSidebarState();
-    if (nativeState) {
-      return nativeState.open;
-    }
     const toggleState = readMobileNavigationToggleState(control);
     if (toggleState === true) {
       rememberMobileSidebarState(true);
@@ -2610,8 +2618,13 @@ function renderWorkBuddyNativeShimJs({
       rememberMobileSidebarState(false);
       return false;
     }
-    if (mobileNavigationAssist.lastKnownOpen && Date.now() - mobileNavigationAssist.lastKnownOpenAt < 300000) {
-      return true;
+    const rememberedState = getRememberedMobileSidebarState();
+    if (rememberedState !== null) {
+      return rememberedState;
+    }
+    const nativeState = readNativeMobileSidebarState();
+    if (nativeState) {
+      return nativeState.open;
     }
     rememberMobileSidebarState(false);
     return false;
@@ -2720,8 +2733,16 @@ function renderWorkBuddyNativeShimJs({
     hitTarget.type = "button";
     hitTarget.tabIndex = -1;
     hitTarget.setAttribute("aria-label", "Toggle navigation");
-    hitTarget.style.cssText = "position:fixed;z-index:2147483644;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;touch-action:none;-webkit-tap-highlight-color:transparent;";
+    hitTarget.style.cssText = "position:fixed;z-index:2147483647;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;";
     applyMobileNavigationTouchHandling(hitTarget);
+    const begin = (event) => {
+      if (!isMobileTouchViewport()) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+    };
     const activate = (event) => {
       if (!isMobileTouchViewport()) {
         return;
@@ -2732,10 +2753,12 @@ function renderWorkBuddyNativeShimJs({
       if (Date.now() - mobileNavigationAssist.lastActivationAt < 350) {
         return;
       }
-      const open = getMobileSidebarOpenState();
+      const open = isLikelyMobileSidebarOpen();
       activateMobileNavigation(!open);
     };
+    hitTarget.addEventListener("pointerdown", begin, true);
     hitTarget.addEventListener("pointerup", activate, true);
+    hitTarget.addEventListener("touchstart", begin, { capture: true, passive: false });
     hitTarget.addEventListener("touchend", activate, { capture: true, passive: false });
     hitTarget.addEventListener("click", activate, true);
     document.body.appendChild(hitTarget);
@@ -2752,8 +2775,8 @@ function renderWorkBuddyNativeShimJs({
     ensureMobileNavigationStyleSheet();
     if (typeof globalThis.__workbuddyRemoteToggleSidebar === "function") {
       const hitTarget = ensureMobileNavigationHitTarget();
-      const width = Math.min(76, Math.max(60, window.innerWidth * 0.18));
-      const height = Math.min(84, Math.max(66, window.innerHeight * 0.085));
+      const width = getMobileNavigationOpenSwipeEdge();
+      const height = Math.min(128, Math.max(92, window.innerHeight * 0.13));
       const top = Math.max(58, Math.min(getTopApplicationMenuBottom() + 2, window.innerHeight - height));
       const nextStyle = {
         left: "0px",
@@ -2826,7 +2849,7 @@ function renderWorkBuddyNativeShimJs({
     const menuOpen = getMobileSidebarOpenState();
     const openEdge = getMobileNavigationOpenSwipeEdge();
     const closeEdge = Math.min(420, Math.max(220, window.innerWidth * 0.82));
-    const canOpen = !menuOpen && x <= openEdge;
+    const canOpen = x <= openEdge;
     const canClose = menuOpen && x <= closeEdge;
     mobileNavigationAssist.gesture = canOpen || canClose
       ? {
