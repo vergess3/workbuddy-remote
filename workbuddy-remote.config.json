@@ -7,8 +7,6 @@
   "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": true,
   "maskBridgeModelSecrets": true,
-  "enableModelSecretProxy": true,
-  "modelProxyPort": 8791,
   "enableFileManager": true,
   "enableRestart": true
 }

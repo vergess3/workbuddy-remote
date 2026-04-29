@@ -16,9 +16,6 @@ const DEFAULT_CONFIG = Object.freeze({
   showReadyWindow: false,
   workspaceRoots: [],
   maskBridgeModelSecrets: false,
-  enableModelSecretProxy: false,
-  modelProxyPort: 8791,
-  modelSecretStorePath: "",
   enableFileManager: true,
   enableRestart: true,
 });
@@ -104,12 +101,6 @@ async function loadConfig() {
       raw?.maskBridgeModelSecrets,
       DEFAULT_CONFIG.maskBridgeModelSecrets
     ),
-    enableModelSecretProxy: normalizeBoolean(
-      raw?.enableModelSecretProxy,
-      DEFAULT_CONFIG.enableModelSecretProxy
-    ),
-    modelProxyPort: normalizePort(raw?.modelProxyPort, DEFAULT_CONFIG.modelProxyPort),
-    modelSecretStorePath: normalizeString(raw?.modelSecretStorePath),
     enableFileManager: normalizeBoolean(raw?.enableFileManager, DEFAULT_CONFIG.enableFileManager),
     enableRestart: normalizeBoolean(raw?.enableRestart, DEFAULT_CONFIG.enableRestart),
   };

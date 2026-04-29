@@ -22,7 +22,6 @@ import {
 } from "../web/workbuddy-native.mjs";
 import { createBridgeAccessAuth } from "./access-auth.mjs";
 import { loadBridgeUiConfig, loadConfig } from "../config.mjs";
-import { createProxyModelUrl } from "./model-proxy.mjs";
 import {
   createWorkspaceFolder,
   deleteWorkspaceFolder,
@@ -54,14 +53,8 @@ const MODEL_SECRET_WRITE_METHODS = new Set([
   "configSet",
   "configSaveLocalCustomModel",
 ]);
-const MODEL_PROXY_RESULT_METHODS = new Set([
-  "configGetLocalCustomModels",
-  "configSaveLocalCustomModel",
-  "configDeleteLocalCustomModel",
-]);
 const REDACTED_MODEL_API_KEY = "workbuddy-remote-redacted-api-key";
 const REDACTED_MODEL_ENDPOINT = "https://workbuddy-remote.local/redacted/chat/completions";
-const MODEL_PROXY_API_KEY = "workbuddy-remote-model-proxy";
 
 async function loadFeatureFlags() {
   const config = await loadConfig();
@@ -247,179 +240,6 @@ function createModelSecretProtector() {
       return method === "configSet" ? restoreConfigSetArgs(args) : restore(args);
     },
   };
-}
-
-function isModelSecretProxyEnabled(options) {
-  return Boolean(options.enableModelSecretProxy && options.modelSecretStore);
-}
-
-function getModelEndpoint(model) {
-  if (!model || typeof model !== "object") {
-    return "";
-  }
-  return typeof model.url === "string" ? model.url : typeof model.endpoint === "string" ? model.endpoint : "";
-}
-
-function setModelEndpoint(model, value) {
-  if (!model || typeof model !== "object") {
-    return;
-  }
-  if (Object.prototype.hasOwnProperty.call(model, "endpoint")) {
-    model.endpoint = value;
-  } else {
-    model.url = value;
-  }
-}
-
-function hasModelApiKeyField(model) {
-  return Boolean(model && typeof model === "object" && Object.prototype.hasOwnProperty.call(model, "apiKey"));
-}
-
-function isProxyEndpoint(value, options) {
-  try {
-    const url = new URL(String(value || ""));
-    return (
-      url.protocol === "http:" &&
-      url.hostname === "127.0.0.1" &&
-      Number(url.port || 80) === Number(options.modelProxyPort || 8791) &&
-      url.pathname.startsWith("/proxy/")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isRedactedOrProxyEndpoint(value, options) {
-  return value === REDACTED_MODEL_ENDPOINT || isProxyEndpoint(value, options);
-}
-
-function isRedactedOrProxyApiKey(value) {
-  return value === REDACTED_MODEL_API_KEY || value === MODEL_PROXY_API_KEY;
-}
-
-function getModelId(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-function cloneJsonValue(value) {
-  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
-}
-
-async function prepareModelSecretProxyArgs(method, args, options) {
-  if (method !== "configSaveLocalCustomModel") {
-    return args;
-  }
-
-  const request = args?.[0];
-  const model = request?.model;
-  const modelId = getModelId(model?.id);
-  if (!modelId) {
-    return args;
-  }
-
-  const nextArgs = cloneJsonValue(args);
-  const nextRequest = nextArgs[0];
-  const nextModel = nextRequest.model;
-  const previousId = getModelId(nextRequest.previousId);
-  const previousSecret =
-    (await options.modelSecretStore.get(modelId)) ||
-    (previousId ? await options.modelSecretStore.get(previousId) : null);
-  const submittedEndpoint = getModelEndpoint(nextModel);
-  const submittedApiKey = hasModelApiKeyField(nextModel) ? String(nextModel.apiKey || "") : "";
-  const endpoint = isRedactedOrProxyEndpoint(submittedEndpoint, options)
-    ? previousSecret?.endpoint || ""
-    : submittedEndpoint;
-  const apiKey = isRedactedOrProxyApiKey(submittedApiKey)
-    ? previousSecret?.apiKey || ""
-    : submittedApiKey;
-
-  if (!endpoint) {
-    return nextArgs;
-  }
-
-  const secret = await options.modelSecretStore.upsert(modelId, {
-    endpoint,
-    apiKey,
-  });
-  if (previousId && previousId !== modelId) {
-    await options.modelSecretStore.delete(previousId);
-  }
-
-  setModelEndpoint(
-    nextModel,
-    createProxyModelUrl({
-      port: options.modelProxyPort,
-      token: secret.token,
-      modelId,
-    })
-  );
-  if (hasModelApiKeyField(nextModel) || apiKey) {
-    nextModel.apiKey = MODEL_PROXY_API_KEY;
-  }
-  return nextArgs;
-}
-
-function getDeletedModelId(method, args) {
-  if (method !== "configDeleteLocalCustomModel") {
-    return "";
-  }
-  const first = args?.[0];
-  if (typeof first === "string") {
-    return getModelId(first);
-  }
-  return getModelId(first?.id || first?.modelId);
-}
-
-function isModelLikeConfig(value) {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      typeof value.id === "string" &&
-      (typeof value.url === "string" ||
-        typeof value.endpoint === "string" ||
-        Object.prototype.hasOwnProperty.call(value, "apiKey"))
-  );
-}
-
-async function protectModelForBrowser(model, options) {
-  const result = { ...model };
-  const modelId = getModelId(result.id);
-  const endpoint = getModelEndpoint(result);
-  const apiKey = hasModelApiKeyField(result) ? String(result.apiKey || "") : "";
-
-  if (modelId && endpoint && !isRedactedOrProxyEndpoint(endpoint, options)) {
-    await options.modelSecretStore.upsert(modelId, {
-      endpoint,
-      apiKey,
-    });
-  }
-
-  if (endpoint) {
-    setModelEndpoint(result, REDACTED_MODEL_ENDPOINT);
-  }
-  if (hasModelApiKeyField(result) || apiKey) {
-    result.apiKey = REDACTED_MODEL_API_KEY;
-  }
-  return result;
-}
-
-async function protectModelProxyResult(value, options) {
-  if (Array.isArray(value)) {
-    return Promise.all(value.map((item) => protectModelProxyResult(item, options)));
-  }
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  if (isModelLikeConfig(value)) {
-    return protectModelForBrowser(value, options);
-  }
-
-  const result = {};
-  for (const [key, nestedValue] of Object.entries(value)) {
-    result[key] = await protectModelProxyResult(nestedValue, options);
-  }
-  return result;
 }
 
 function writeFeatureDisabled(res, featureName) {
@@ -920,7 +740,7 @@ function createRequestHandler(runtime, auth) {
   };
 }
 
-function attachWebSocketServer(server, runtime, auth, options) {
+function attachWebSocketServer(server, runtime, auth) {
   const wss = new WebSocketServer({ noServer: true });
   const modelSecretProtector = createModelSecretProtector();
 
@@ -965,25 +785,13 @@ function attachWebSocketServer(server, runtime, auth, options) {
         if (message.type === "buddy-api-call") {
           const bridgeUiConfig = await loadBridgeUiConfig();
           const shouldProtectModelSecrets = bridgeUiConfig.maskBridgeModelSecrets === true;
-          const shouldProxyModelSecrets = shouldProtectModelSecrets && isModelSecretProxyEnabled(options);
-          let args = message.args || [];
-          if (shouldProxyModelSecrets) {
-            args = await prepareModelSecretProxyArgs(message.method, args, options);
-          }
-          args = shouldProtectModelSecrets
-            ? modelSecretProtector.restoreArgs(message.method, args)
-            : args;
+          const args = shouldProtectModelSecrets
+            ? modelSecretProtector.restoreArgs(message.method, message.args || [])
+            : message.args || [];
           const rawResult = await runtime.invokeBuddyApi(message.method, args);
-          const deletedModelId = shouldProxyModelSecrets ? getDeletedModelId(message.method, args) : "";
-          if (deletedModelId) {
-            await options.modelSecretStore.delete(deletedModelId);
-          }
-          const proxyProtectedResult = shouldProxyModelSecrets && MODEL_PROXY_RESULT_METHODS.has(message.method)
-            ? await protectModelProxyResult(rawResult, options)
-            : rawResult;
           const result = shouldProtectModelSecrets
-            ? modelSecretProtector.protectResult(message.method, args, proxyProtectedResult)
-            : proxyProtectedResult;
+            ? modelSecretProtector.protectResult(message.method, args, rawResult)
+            : rawResult;
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,
@@ -1079,7 +887,7 @@ async function startBridgeServer(runtime, options) {
   const server = http.createServer(createRequestHandler(runtime, auth));
   server.requestTimeout = 0;
   server.setTimeout(0);
-  attachWebSocketServer(server, runtime, auth, options);
+  attachWebSocketServer(server, runtime, auth);
 
   await new Promise((resolve, reject) => {
     const onError = (error) => {

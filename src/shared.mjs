@@ -16,9 +16,6 @@ const DEFAULTS = {
   workbuddyPid: 0,
   openBrowser: false,
   logPath: "",
-  enableModelSecretProxy: false,
-  modelProxyPort: 8791,
-  modelSecretStorePath: "",
 };
 
 function parseArgs(argv) {
@@ -60,17 +57,6 @@ function parseArgs(argv) {
         break;
       case "--log-path":
         options.logPath = next || "";
-        i += 1;
-        break;
-      case "--model-secret-proxy":
-        options.enableModelSecretProxy = true;
-        break;
-      case "--model-proxy-port":
-        options.modelProxyPort = Number(next) || options.modelProxyPort;
-        i += 1;
-        break;
-      case "--model-secret-store-path":
-        options.modelSecretStorePath = next || "";
         i += 1;
         break;
       default:

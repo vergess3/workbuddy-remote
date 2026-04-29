@@ -57,14 +57,10 @@ Remote listening requires a password hash.
   "bridgePort": 8780,
   "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": false,
-  "maskBridgeModelSecrets": true,
-  "enableModelSecretProxy": true,
-  "modelProxyPort": 8791
+  "maskBridgeModelSecrets": true
 }
 ```
 
 When `maskBridgeModelSecrets` is `true`, the bridge redacts model API address / Base URL and API Key values on the server before returning config data to the browser, and the page also masks those inputs visually.
-
-When `enableModelSecretProxy` is `true`, newly saved model configs store the real API address and API Key in a current-user Windows DPAPI encrypted secret store. WorkBuddy's `models.json` only receives a local proxy URL and a placeholder key.
 
 Refreshing the web page only recreates the browser WebSocket. It does not create a new WorkBuddy process, and socket cleanup releases event subscriptions for the closed page.
