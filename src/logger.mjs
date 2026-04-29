@@ -8,7 +8,7 @@ const LEVELS = new Map([
   ["error", 40],
 ]);
 const DEFAULT_LEVEL = "info";
-const REDACTED_KEY_PATTERN = /password|token|secret|authorization|cookie|hash|credential|session|api[_-]?key|endpoint|base[_-]?url|api[_-]?url/i;
+const REDACTED_KEY_PATTERN = /password|token|secret|authorization|cookie|hash|credential|session|api[_-]?key|endpoint|base[_-]?url|api[_-]?url|^url$/i;
 
 function normalizeLevel(level) {
   const value = String(level || "").trim().toLowerCase();

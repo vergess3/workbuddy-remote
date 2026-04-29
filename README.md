@@ -79,13 +79,17 @@ powershell -ExecutionPolicy Bypass -File .\tools\start-workbuddy-remote.ps1 -Lis
   "bridgePort": 8780,
   "listenHost": "127.0.0.1",
   "killWorkBuddyProcessesBeforeStart": false,
-  "maskBridgeModelSecrets": true
+  "maskBridgeModelSecrets": true,
+  "enableModelSecretProxy": true,
+  "modelProxyPort": 8791
 }
 ```
 
 `workbuddyExePath` 留空时会自动查找常见安装路径。
 
 `maskBridgeModelSecrets` 设为 `true` 时，bridge 会先在服务端拦截模型配置读取结果，把接口地址 / Base URL 和 API Key 替换成占位值，再返回给浏览器；页面上也会继续把对应输入框显示为圆点。
+
+`enableModelSecretProxy` 设为 `true` 时，新保存的模型配置会把真实接口地址和 API Key 存进当前 Windows 用户 DPAPI 加密的 secret store，写给 WorkBuddy 的 `models.json` 只保留本机 proxy 地址和假 key。
 
 ## 进程和连接
 

@@ -384,6 +384,16 @@ New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null
 Ensure-NodeDependencies -TempDir $tempDir
 
+$EnableModelSecretProxy = Get-ConfigBool -Config $config -Name "enableModelSecretProxy" -Fallback $false
+$ModelProxyPort = Get-ConfigInt -Config $config -Name "modelProxyPort" -Fallback 8791
+$configuredModelSecretStorePath = Get-ConfigString -Config $config -Name "modelSecretStorePath"
+$ModelSecretStorePath = if ($configuredModelSecretStorePath) {
+    Resolve-ProjectPath $configuredModelSecretStorePath
+}
+else {
+    Join-Path $runtimeRoot "model-secrets.dpapi"
+}
+
 $bridgeLog = Join-Path $tempDir "bridge-$BridgePort.log"
 $bridgeErr = Join-Path $tempDir "bridge-$BridgePort.err.log"
 $bridgeEvents = Join-Path $tempDir "bridge-$BridgePort.events.log"
@@ -391,6 +401,10 @@ Remove-Item $bridgeLog, $bridgeErr, $bridgeEvents -ErrorAction SilentlyContinue
 
 Write-Host "Stopping bridge on port $BridgePort (if any)..."
 Stop-PortProcess -Port ([int]$BridgePort)
+if ($EnableModelSecretProxy) {
+    Write-Host "Stopping model proxy on port $ModelProxyPort (if any)..."
+    Stop-PortProcess -Port ([int]$ModelProxyPort)
+}
 
 $exePath = Find-WorkBuddyExecutable -Config $config
 $workBuddyPid = 0
@@ -438,6 +452,13 @@ $bridgeArgs = @(
 )
 if ($PasswordHash) {
     $bridgeArgs += @("--password-hash", "$PasswordHash")
+}
+if ($EnableModelSecretProxy) {
+    $bridgeArgs += @(
+        "--model-secret-proxy",
+        "--model-proxy-port", "$ModelProxyPort",
+        "--model-secret-store-path", "$ModelSecretStorePath"
+    )
 }
 if ($OpenBrowser) {
     $bridgeArgs += "--open-browser"

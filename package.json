@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/main.mjs",
-    "check": "node --check src/main.mjs && node --check src/server/bridge-server.mjs && node --check src/bridge/runtime.mjs && node --check src/web/workbuddy-native.mjs && node --check src/server/access-auth.mjs && node --check src/server/password-hash.mjs && node --check src/workspace/service.mjs && node --check src/config.mjs && node --check src/asar.mjs && node --check src/shared.mjs && node --check src/logger.mjs && node --check tools/workbuddy-password-hash.mjs"
+    "check": "node --check src/main.mjs && node --check src/server/bridge-server.mjs && node --check src/bridge/runtime.mjs && node --check src/web/workbuddy-native.mjs && node --check src/server/access-auth.mjs && node --check src/server/password-hash.mjs && node --check src/server/model-secret-store.mjs && node --check src/server/model-proxy.mjs && node --check src/workspace/service.mjs && node --check src/config.mjs && node --check src/asar.mjs && node --check src/shared.mjs && node --check src/logger.mjs && node --check tools/workbuddy-password-hash.mjs"
   },
   "dependencies": {
     "ws": "^8.18.3"
