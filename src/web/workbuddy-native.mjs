@@ -77,6 +77,11 @@ function renderWorkBuddyNativeShimJs({
   let nativeNewWorkspaceIntentAt = 0;
   let nativeNewWorkspaceCanceledAt = 0;
   let pendingNativeNewWorkspacePath = "";
+  let pendingLoginPopup = null;
+  let pendingLoginPopupNavigated = false;
+  let loginAuthUrlCaptureDepth = 0;
+  let lastLoginAuthUrl = "";
+  let lastLoginAuthUrlOpenedAt = 0;
 
   const eventMethodPattern = /^(?:on[A-Z]|\\$on$)/u;
   const messages = {
@@ -2586,6 +2591,173 @@ function renderWorkBuddyNativeShimJs({
     return payload;
   }
 
+  function normalizeHttpUrl(value) {
+    const input = String(value || "").trim();
+    if (!input) {
+      return "";
+    }
+    try {
+      const parsed = new URL(input);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return "";
+      }
+      return parsed.toString();
+    } catch {
+      return "";
+    }
+  }
+
+  function findAuthUrl(value, depth = 0) {
+    if (!value || depth > 4) {
+      return "";
+    }
+    if (typeof value === "string") {
+      return normalizeHttpUrl(value);
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const nestedUrl = findAuthUrl(item, depth + 1);
+        if (nestedUrl) {
+          return nestedUrl;
+        }
+      }
+      return "";
+    }
+    if (typeof value !== "object") {
+      return "";
+    }
+
+    for (const key of ["authUrl", "authorizationUrl", "loginUrl", "url", "href"]) {
+      const directUrl = findAuthUrl(value[key], depth + 1);
+      if (directUrl) {
+        return directUrl;
+      }
+    }
+
+    for (const nestedValue of Object.values(value)) {
+      const nestedUrl = findAuthUrl(nestedValue, depth + 1);
+      if (nestedUrl) {
+        return nestedUrl;
+      }
+    }
+    return "";
+  }
+
+  function isAuthUrlEvent(message) {
+    const key = String(message?.key || "");
+    const method = String(message?.method || "");
+    return (
+      key === "authUrlChanged" ||
+      key === "$on:authUrlChanged" ||
+      method === "authUrlChanged" ||
+      (method === "$on" && key.endsWith(":authUrlChanged"))
+    );
+  }
+
+  function shouldOpenAuthUrl(url) {
+    const now = Date.now();
+    if (lastLoginAuthUrl === url && now - lastLoginAuthUrlOpenedAt < 5000) {
+      return false;
+    }
+    lastLoginAuthUrl = url;
+    lastLoginAuthUrlOpenedAt = now;
+    return true;
+  }
+
+  function closePendingLoginPopupIfUnused(expectedPopup = pendingLoginPopup) {
+    if (!expectedPopup || expectedPopup !== pendingLoginPopup || pendingLoginPopupNavigated) {
+      return;
+    }
+    pendingLoginPopup = null;
+    try {
+      if (!expectedPopup.closed) {
+        expectedPopup.close();
+      }
+    } catch {}
+  }
+
+  function prepareLoginPopup() {
+    closePendingLoginPopupIfUnused();
+    pendingLoginPopup = null;
+    pendingLoginPopupNavigated = false;
+    try {
+      pendingLoginPopup = window.open("about:blank", "_blank");
+      if (pendingLoginPopup) {
+        try {
+          pendingLoginPopup.opener = null;
+          pendingLoginPopup.document.title = "WorkBuddy Login";
+        } catch {}
+      }
+    } catch {
+      pendingLoginPopup = null;
+    }
+    return pendingLoginPopup;
+  }
+
+  function openAuthUrlInUserBrowser(value) {
+    if (loginAuthUrlCaptureDepth <= 0) {
+      return false;
+    }
+
+    const url = findAuthUrl(value);
+    if (!url || !shouldOpenAuthUrl(url)) {
+      return false;
+    }
+
+    const popup = pendingLoginPopup;
+    pendingLoginPopup = null;
+    if (popup && !popup.closed) {
+      try {
+        popup.location.href = url;
+        pendingLoginPopupNavigated = true;
+        popup.focus?.();
+        return true;
+      } catch {
+        try {
+          popup.close();
+        } catch {}
+      }
+    }
+
+    pendingLoginPopupNavigated = false;
+    try {
+      return Boolean(window.open(url, "_blank", "noopener,noreferrer"));
+    } catch {
+      return false;
+    }
+  }
+
+  function beginLoginAuthUrlCapture() {
+    loginAuthUrlCaptureDepth += 1;
+  }
+
+  function endLoginAuthUrlCapture() {
+    loginAuthUrlCaptureDepth = Math.max(0, loginAuthUrlCaptureDepth - 1);
+  }
+
+  async function subscribeLoginAuthUrl() {
+    try {
+      await request({
+        type: "buddy-api-subscribe",
+        method: "$on",
+        key: "$on:authUrlChanged",
+        args: ["authUrlChanged"],
+      });
+      return true;
+    } catch (error) {
+      console.warn("[workbuddy-remote] auth URL subscription failed", error);
+      return false;
+    }
+  }
+
+  function unsubscribeLoginAuthUrl() {
+    request({
+      type: "buddy-api-unsubscribe",
+      method: "$on",
+      key: "$on:authUrlChanged",
+    }).catch(() => {});
+  }
+
   function connect() {
     if (socket && socket.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -2639,11 +2811,14 @@ function renderWorkBuddyNativeShimJs({
 
         if (message.type === "buddy-api-event") {
           const key = message.key || message.method;
+          const args = (message.args || []).map(decodeTransport);
+          if (isAuthUrlEvent(message)) {
+            openAuthUrlInUserBrowser(args);
+          }
           const callbacks = listeners.get(key);
           if (!callbacks) {
             return;
           }
-          const args = (message.args || []).map(decodeTransport);
           for (const callback of [...callbacks]) {
             try {
               callback(...args);
@@ -2718,6 +2893,20 @@ function renderWorkBuddyNativeShimJs({
     if (method === "windowReload") {
       location.reload();
       return true;
+    }
+    if (method === "login") {
+      const loginPopup = prepareLoginPopup();
+      beginLoginAuthUrlCapture();
+      const authUrlSubscribed = await subscribeLoginAuthUrl();
+      try {
+        return await forwardBuddyApiCall(method, args);
+      } finally {
+        if (authUrlSubscribed) {
+          unsubscribeLoginAuthUrl();
+        }
+        endLoginAuthUrlCapture();
+        closePendingLoginPopupIfUnused(loginPopup);
+      }
     }
     if (method === "openExternal") {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
