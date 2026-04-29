@@ -466,12 +466,13 @@ function createRequestHandler(runtime, auth) {
           runtime.getWorkBuddyLocale(),
           loadFeatureFlags(),
         ]);
+        const shim = renderWorkBuddyNativeShimJs({ methods, version, locale, ...features });
         sendVersionedScript(
           req,
           res,
-          renderWorkBuddyNativeShimJs({ methods, version, locale, ...features }),
+          shim,
           {
-            etag: `"workbuddy-native-shim-${version || "unknown"}-${locale || "unknown"}-${methods.length}-${features.enableFileManager ? "files-on" : "files-off"}-${features.enableRestart ? "restart-on" : "restart-off"}"`,
+            etag: `"workbuddy-native-shim-${version || "unknown"}-${locale || "unknown"}-${methods.length}-${shim.length}-${features.enableFileManager ? "files-on" : "files-off"}-${features.enableRestart ? "restart-on" : "restart-off"}"`,
             cacheControl: REVALIDATED_STATIC_CACHE_CONTROL,
           }
         );

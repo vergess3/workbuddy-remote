@@ -54,7 +54,7 @@ function renderWorkBuddyNativeShimJs({
   enableFileManager = true,
   enableRestart = true,
 } = {}) {
-  const methodList = methods.length > 0 ? methods : FALLBACK_BUDDY_API_METHODS;
+  const methodList = [...new Set([...FALLBACK_BUDDY_API_METHODS, ...methods])];
   return `(() => {
   const apiMethods = ${JSON.stringify(methodList)};
   const workBuddyVersion = ${JSON.stringify(version || "")};
@@ -284,6 +284,7 @@ function renderWorkBuddyNativeShimJs({
   async function uploadWorkspaceFiles(folderPath, files, onProgress) {
     await connect();
     let completedBytes = 0;
+    const uploaded = [];
     for (const file of files) {
       const uploadId = "upload-" + Date.now() + "-" + Math.random().toString(16).slice(2);
       pendingUploadProgress.set(uploadId, (message) => {
@@ -302,6 +303,7 @@ function renderWorkBuddyNativeShimJs({
         if (!result?.ok) {
           throw new Error(result?.error || "Upload failed");
         }
+        uploaded.push(result);
       } finally {
         pendingUploadProgress.delete(uploadId);
       }
@@ -311,6 +313,7 @@ function renderWorkBuddyNativeShimJs({
         totalBytes: files.reduce((sum, item) => sum + item.size, 0),
       });
     }
+    return uploaded;
   }
 
   function createUploadProgressControl() {
@@ -750,13 +753,25 @@ function renderWorkBuddyNativeShimJs({
     });
   }
 
+  function pickFileAccept(options = {}) {
+    const filters = Array.isArray(options.filters) ? options.filters : [];
+    return filters
+      .flatMap((filter) => Array.isArray(filter?.extensions) ? filter.extensions : [])
+      .map((extension) => String(extension || "").trim())
+      .filter(Boolean)
+      .map((extension) => extension === "*" ? "" : extension.startsWith(".") ? extension : "." + extension)
+      .filter(Boolean)
+      .join(",");
+  }
+
   async function pickBrowserFiles(options = {}) {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
-      input.multiple = options.multiple !== false;
-      if (typeof options.accept === "string" && options.accept.trim()) {
-        input.accept = options.accept;
+      input.multiple = Boolean(options.canSelectMany || options.multiple);
+      const accept = pickFileAccept(options);
+      if (accept) {
+        input.accept = accept;
       }
       input.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;";
       const cleanup = () => input.remove();
@@ -768,6 +783,29 @@ function renderWorkBuddyNativeShimJs({
       document.body.appendChild(input);
       input.click();
     });
+  }
+
+  async function pickAndUploadFiles(options = {}) {
+    const files = await pickBrowserFiles(options);
+    if (files.length === 0) {
+      return {
+        canceled: true,
+        files: [],
+      };
+    }
+    const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs([options]));
+    const folderPath = selected?.[0];
+    if (!folderPath) {
+      return {
+        canceled: true,
+        files: [],
+      };
+    }
+    const uploaded = await uploadWorkspaceFiles(folderPath, files);
+    return {
+      canceled: false,
+      files: uploaded.map((entry) => entry.path).filter(Boolean),
+    };
   }
 
   function confirmDestructiveAction(title, description, confirmLabel = t("deleteConfirm"), warningText = t("deleteWarning")) {
@@ -1333,51 +1371,6 @@ function renderWorkBuddyNativeShimJs({
     });
   }
 
-  function isElementVisible(element) {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
-    return rect.width > 8 && rect.height > 8 && style.display !== "none" && style.visibility !== "hidden";
-  }
-
-  function findActiveComposerEditor() {
-    if (document.activeElement instanceof HTMLElement) {
-      const active = document.activeElement;
-      if (active instanceof HTMLTextAreaElement || active.isContentEditable || active.getAttribute("role") === "textbox") {
-        return active;
-      }
-    }
-    return Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']"))
-      .filter(isElementVisible)
-      .at(-1) || null;
-  }
-
-  async function attachFilesToComposer(files) {
-    const editor = findActiveComposerEditor();
-    if (!editor) {
-      return false;
-    }
-    const transfer = new DataTransfer();
-    for (const file of files) {
-      transfer.items.add(file);
-    }
-    editor.dispatchEvent(new DragEvent("drop", {
-      bubbles: true,
-      cancelable: true,
-      dataTransfer: transfer,
-    }));
-    return true;
-  }
-
-  async function pickAndAttachLocalFiles() {
-    const files = await pickBrowserFiles({ multiple: true });
-    if (files.length > 0) {
-      await attachFilesToComposer(files);
-    }
-  }
-
   function getControlFromEvent(event) {
     for (const item of event.composedPath?.() || []) {
       if (item?.nodeType === 1 && typeof item.matches === "function" && item.matches("button,a,[role='button'],[role='menuitem']")) {
@@ -1419,11 +1412,6 @@ function renderWorkBuddyNativeShimJs({
     }
 
     const label = getControlLabel(control);
-    if (control.getAttribute?.("data-addition-id") === "add-local-files" || /(本地文件|上传文件|添加文件|local files?|upload file|attach file)/iu.test(label)) {
-      await pickAndAttachLocalFiles();
-      return true;
-    }
-
     const localPath = getControlLocalPath(control);
     if (localPath && /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label)) {
       await openWorkspaceFileManagerOnce({ targetPath: localPath });
@@ -1453,8 +1441,6 @@ function renderWorkBuddyNativeShimJs({
       }
       const label = getControlLabel(control);
       const shouldHandle =
-        control.getAttribute?.("data-addition-id") === "add-local-files" ||
-        /(本地文件|上传文件|添加文件|local files?|upload file|attach file)/iu.test(label) ||
         /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label) ||
         /打开.*本地.*工作空间|选择.*本地.*工作空间|open.*local.*workspace|choose.*local.*workspace/iu.test(label);
       if (!shouldHandle) {
@@ -1852,9 +1838,23 @@ function renderWorkBuddyNativeShimJs({
       }
     }
     if ((method === "pickFolder" || method === "selectDirectory") && fileManagerEnabled) {
-      return promptForRemoteFolderPath(getPathCandidateFromArgs(args));
+      const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs(args));
+      return {
+        canceled: !selected?.[0],
+        folderPaths: selected?.[0] ? selected : [],
+      };
     }
-    if ((method === "workspaceOpen" || method === "workspaceOpenFolder") && fileManagerEnabled) {
+    if (method === "workspaceOpenFolder" && fileManagerEnabled) {
+      const targetPath = getPathCandidateFromArgs(args);
+      if (isLocalPathLike(targetPath)) {
+        await openWorkspaceFileManagerOnce({ targetPath });
+        return true;
+      }
+      const selected = await promptForRemoteFolderPath(targetPath);
+      const folderPath = selected?.[0];
+      return folderPath ? forwardBuddyApiCall(method, [folderPath]) : false;
+    }
+    if (method === "workspaceOpen" && fileManagerEnabled) {
       const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs(args));
       const folderPath = selected?.[0];
       if (!folderPath) {
@@ -1864,11 +1864,10 @@ function renderWorkBuddyNativeShimJs({
     }
     if (method === "pickFile" || method === "selectFile") {
       const options = args?.[0] && typeof args[0] === "object" ? args[0] : {};
-      const files = await pickBrowserFiles(options);
-      if (method === "selectFile" || options.multiple === false) {
-        return files[0] || null;
-      }
-      return files;
+      return pickAndUploadFiles({
+        ...options,
+        canSelectMany: method === "selectFile" ? false : options.canSelectMany,
+      });
     }
     if ((method === "readClipboard" || method === "clipboardReadText") && navigator.clipboard?.readText) {
       return navigator.clipboard.readText();
