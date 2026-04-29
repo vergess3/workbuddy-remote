@@ -122,6 +122,7 @@ function renderWorkBuddyNativeShimJs({
       selectedFiles: "已选择：{names}{suffix}",
       selectedFilesHint: "已选择文件，点击这里可重新选择，或直接继续拖拽替换。",
       uploadProgress: "正在上传：{percent}% ({loaded} / {total})",
+      uploadComplete: "已上传 {names} 到 {workspace}",
       currentWorkspace: "当前工作空间：{path}",
       currentRoot: "当前根目录：{path}",
       noWorkspaceAvailable: "还没有可用的工作空间。",
@@ -181,6 +182,7 @@ function renderWorkBuddyNativeShimJs({
       selectedFiles: "Selected: {names}{suffix}",
       selectedFilesHint: "Files selected. Click here to choose again, or drag more files here to replace them.",
       uploadProgress: "Uploading: {percent}% ({loaded} / {total})",
+      uploadComplete: "Uploaded {names} to {workspace}",
       currentWorkspace: "Current workspace: {path}",
       currentRoot: "Current root: {path}",
       noWorkspaceAvailable: "No workspace is available yet.",
@@ -236,6 +238,14 @@ function renderWorkBuddyNativeShimJs({
     }
     banner.textContent = message;
     banner.style.display = "block";
+  }
+
+  function showBridgeToast(message) {
+    const toast = document.createElement("div");
+    toast.textContent = message;
+    toast.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:420px;padding:10px 12px;border-radius:10px;background:rgba(17,24,39,.96);color:#eef2ff;font:12px/1.5 'Segoe UI',sans-serif;box-shadow:0 12px 36px rgba(0,0,0,.32);";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 4500);
   }
 
   function applyFloatingActionButtonStyle(button, rightPx, disabled = false, background = "rgba(24,31,53,.96)", textColor = "#eef2ff") {
@@ -376,6 +386,17 @@ function renderWorkBuddyNativeShimJs({
     return /^(?:file|vscode-file):/iu.test(input) || /^[A-Za-z]:[\\\\/]/u.test(input);
   }
 
+  function isRelativePathLike(value) {
+    const input = String(value || "").trim();
+    return Boolean(input && !isLocalPathLike(input) && !/^[a-z][a-z0-9+.-]*:/iu.test(input));
+  }
+
+  function joinWindowsPath(parent, child) {
+    const cleanParent = String(parent || "").replace(/[\\\\/]+$/g, "");
+    const cleanChild = String(child || "").replace(/^[\\\\/]+/g, "");
+    return cleanParent && cleanChild ? cleanParent + "\\\\" + cleanChild.replace(/\\//g, "\\\\") : cleanParent || cleanChild;
+  }
+
   function choosePreferredRoot(roots, targetPath) {
     const normalizedTarget = normalizeLocalPathInput(targetPath).toLowerCase();
     if (normalizedTarget) {
@@ -427,6 +448,30 @@ function renderWorkBuddyNativeShimJs({
       }
     }
     return "";
+  }
+
+  function readWorkspacePath(value) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (!value || typeof value !== "object") {
+      return "";
+    }
+    for (const key of ["path", "folderPath", "workspacePath", "cwd", "fsPath"]) {
+      if (typeof value[key] === "string" && value[key].trim()) {
+        return value[key].trim();
+      }
+    }
+    return "";
+  }
+
+  async function getCurrentWorkspacePath() {
+    try {
+      const current = await forwardBuddyApiCall("workspaceGetCurrent", []);
+      return readWorkspacePath(current);
+    } catch {
+      return "";
+    }
   }
 
   function replacePathCandidateInArgs(args, folderPath) {
@@ -793,8 +838,11 @@ function renderWorkBuddyNativeShimJs({
         files: [],
       };
     }
-    const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs([options]));
-    const folderPath = selected?.[0];
+    let folderPath = await getCurrentWorkspacePath();
+    if (!folderPath) {
+      const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs([options]));
+      folderPath = selected?.[0] || "";
+    }
     if (!folderPath) {
       return {
         canceled: true,
@@ -802,6 +850,8 @@ function renderWorkBuddyNativeShimJs({
       };
     }
     const uploaded = await uploadWorkspaceFiles(folderPath, files);
+    const names = files.map((file) => file.name).join(", ");
+    showBridgeToast(t("uploadComplete", { names, workspace: folderPath }));
     return {
       canceled: false,
       files: uploaded.map((entry) => entry.path).filter(Boolean),
@@ -1418,15 +1468,6 @@ function renderWorkBuddyNativeShimJs({
       return true;
     }
 
-    if (/打开.*本地.*工作空间|选择.*本地.*工作空间|open.*local.*workspace|choose.*local.*workspace/iu.test(label)) {
-      const selected = await promptForRemoteFolderPath(localPath);
-      const folderPath = selected?.[0];
-      if (folderPath) {
-        await forwardBuddyApiCall("workspaceOpenFolder", [folderPath]);
-      }
-      return true;
-    }
-
     return false;
   }
 
@@ -1441,8 +1482,7 @@ function renderWorkBuddyNativeShimJs({
       }
       const label = getControlLabel(control);
       const shouldHandle =
-        /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label) ||
-        /打开.*本地.*工作空间|选择.*本地.*工作空间|open.*local.*workspace|choose.*local.*workspace/iu.test(label);
+        /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|open.*folder|show.*folder|reveal.*(explorer|folder)/iu.test(label);
       if (!shouldHandle) {
         return;
       }
@@ -1850,9 +1890,14 @@ function renderWorkBuddyNativeShimJs({
         await openWorkspaceFileManagerOnce({ targetPath });
         return true;
       }
-      const selected = await promptForRemoteFolderPath(targetPath);
-      const folderPath = selected?.[0];
-      return folderPath ? forwardBuddyApiCall(method, [folderPath]) : false;
+      if (isRelativePathLike(targetPath)) {
+        const workspacePath = await getCurrentWorkspacePath();
+        await openWorkspaceFileManagerOnce({
+          targetPath: workspacePath ? joinWindowsPath(workspacePath, targetPath) : targetPath,
+        });
+        return true;
+      }
+      return forwardBuddyApiCall(method, args);
     }
     if (method === "workspaceOpen" && fileManagerEnabled) {
       const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs(args));
