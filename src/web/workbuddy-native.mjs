@@ -72,13 +72,16 @@ function renderWorkBuddyNativeShimJs({
   let fileManagerOpenPromise = null;
   const pendingUploadProgress = new Map();
   let lastWorkspaceNameHint = "";
+  let nativeNewWorkspaceIntentAt = 0;
+  let nativeNewWorkspaceCanceledAt = 0;
+  let pendingNativeNewWorkspacePath = "";
 
   const eventMethodPattern = /^(?:on[A-Z]|\\$on$)/u;
   const messages = {
     zhCN: {
       fileManager: "文件管理",
       chooseWorkspaceOnHost: "选择服务器端上的工作空间",
-      chooseWorkspaceSubtitle: "先选可操作根目录，再选择一个工作空间；也可以在下拉菜单中从新工作空间开始。",
+      chooseWorkspaceSubtitle: "先选可操作根目录，再选择一个工作空间；也可以在下拉菜单中直接新建文件夹。",
       searchWorkspaces: "搜索工作空间",
       searchWorkspacePlaceholder: "输入名字过滤列表",
       chooseThisFolder: "选择此文件夹",
@@ -99,7 +102,6 @@ function renderWorkBuddyNativeShimJs({
       workspace: "工作空间",
       selectWorkspace: "请选择工作空间",
       createFolder: "+ 新建文件夹...",
-      startNewWorkspace: "从新工作空间开始...",
       manageWorkspaces: "管理工作空间",
       manageWorkspacesTitle: "管理工作空间",
       newWorkspace: "新建工作空间",
@@ -148,7 +150,7 @@ function renderWorkBuddyNativeShimJs({
     en: {
       fileManager: "File Manager",
       chooseWorkspaceOnHost: "Choose a workspace on the host",
-      chooseWorkspaceSubtitle: "Select an allowed root first, then choose a workspace. You can also start from a new workspace in the dropdown.",
+      chooseWorkspaceSubtitle: "Select an allowed root first, then choose a workspace. You can also create a new folder directly from the dropdown.",
       searchWorkspaces: "Search workspaces",
       searchWorkspacePlaceholder: "Type a name to filter the list",
       chooseThisFolder: "Use this folder",
@@ -169,7 +171,6 @@ function renderWorkBuddyNativeShimJs({
       workspace: "Workspace",
       selectWorkspace: "Select a workspace",
       createFolder: "+ Create new folder...",
-      startNewWorkspace: "Start from a new workspace...",
       manageWorkspaces: "Manage workspaces",
       manageWorkspacesTitle: "Manage workspaces",
       newWorkspace: "New workspace",
@@ -553,6 +554,34 @@ function renderWorkBuddyNativeShimJs({
     }
   }
 
+  function isNativeNewWorkspaceText(text) {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim();
+    return /^(?:从新工作空间开始|Start from a new workspace)(?:\s*[✓✔])?$/iu.test(normalized);
+  }
+
+  function rememberNativeNewWorkspaceIntentFromEvent(event) {
+    for (const item of event.composedPath?.() || []) {
+      if (!item || item.nodeType !== 1 || item === document.body || item === document.documentElement) {
+        continue;
+      }
+      const text = [
+        item.getAttribute?.("aria-label"),
+        item.getAttribute?.("title"),
+        item.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (text.length <= 80 && isNativeNewWorkspaceText(text)) {
+        nativeNewWorkspaceIntentAt = Date.now();
+        return;
+      }
+    }
+  }
+
+  function hasRecentNativeNewWorkspaceIntent() {
+    return nativeNewWorkspaceIntentAt > 0 && Date.now() - nativeNewWorkspaceIntentAt < 5000;
+  }
+
   function getWorkspaceNameHintFromPage() {
     const focusedName = readWorkspaceNameFromElement(document.activeElement);
     if (focusedName) {
@@ -835,7 +864,7 @@ function renderWorkBuddyNativeShimJs({
       workspaceField.appendChild(workspaceSelect);
       const createWorkspaceOption = document.createElement("option");
       createWorkspaceOption.value = "__create_workspace__";
-      createWorkspaceOption.textContent = t("startNewWorkspace");
+      createWorkspaceOption.textContent = t("createFolder");
 
       const refreshButton = document.createElement("button");
       refreshButton.type = "button";
@@ -1252,6 +1281,31 @@ function renderWorkBuddyNativeShimJs({
     }
     workspaceFolderLookupCache.clear();
     return result;
+  }
+
+  async function promptAndCreateNativeWorkspace() {
+    const roots = await fetchWorkspaceRoots();
+    const preferred = await resolvePreferredWorkspaceSelection(roots, "");
+    const rootPath = preferred.rootPath || roots[0]?.path || "";
+    pendingNativeNewWorkspacePath = "";
+    const result = await promptAndCreateWorkspace(rootPath);
+    if (!result?.path) {
+      pendingNativeNewWorkspacePath = "";
+      nativeNewWorkspaceCanceledAt = Date.now();
+      return "";
+    }
+    pendingNativeNewWorkspacePath = result.path;
+    return result.path;
+  }
+
+  async function resolveKnownWorkspaceFolderPath(targetPath) {
+    const normalizedTargetPath = normalizeLocalPathInput(targetPath);
+    if (!normalizedTargetPath || !isLocalPathLike(normalizedTargetPath)) {
+      return "";
+    }
+    const roots = await fetchWorkspaceRoots();
+    const matched = await findWorkspaceFolderByPath(normalizedTargetPath, roots);
+    return matched?.folder?.path || "";
   }
 
   async function openWorkspaceManager({ roots = [], rootPath = "", folderPath = "" } = {}) {
@@ -2112,7 +2166,10 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     workspaceHintTrackerInstalled = true;
-    const handler = (event) => rememberWorkspaceHintFromElement(event.target);
+    const handler = (event) => {
+      rememberWorkspaceHintFromElement(event.target);
+      rememberNativeNewWorkspaceIntentFromEvent(event);
+    };
     for (const type of ["pointerdown", "click", "focusin"]) {
       document.addEventListener(type, handler, true);
     }
@@ -2529,6 +2586,10 @@ function renderWorkBuddyNativeShimJs({
         folderPaths: selected?.[0] ? selected : [],
       };
     }
+    if (method === "workspaceGenerateDefaultCwd" && fileManagerEnabled && hasRecentNativeNewWorkspaceIntent()) {
+      nativeNewWorkspaceIntentAt = 0;
+      return promptAndCreateNativeWorkspace();
+    }
     if (method === "workspaceOpenFolder" && fileManagerEnabled) {
       const targetPath = getPathCandidateFromArgs(args);
       if (isLocalPathLike(targetPath)) {
@@ -2542,7 +2603,24 @@ function renderWorkBuddyNativeShimJs({
       return forwardBuddyApiCall(method, args);
     }
     if (method === "workspaceOpen" && fileManagerEnabled) {
-      const selected = await promptForRemoteFolderPath(getPathCandidateFromArgs(args));
+      const targetPath = getPathCandidateFromArgs(args);
+      const normalizedTargetPath = normalizeLocalPathInput(targetPath);
+      if (!normalizedTargetPath && Date.now() - nativeNewWorkspaceCanceledAt < 5000) {
+        return false;
+      }
+      const pendingWorkspacePath =
+        pendingNativeNewWorkspacePath && (!normalizedTargetPath || isSameOrChildPath(pendingNativeNewWorkspacePath, normalizedTargetPath))
+          ? pendingNativeNewWorkspacePath
+          : "";
+      if (pendingWorkspacePath) {
+        pendingNativeNewWorkspacePath = "";
+        return forwardBuddyApiCall(method, replacePathCandidateInArgs(args, pendingWorkspacePath));
+      }
+      const knownWorkspacePath = await resolveKnownWorkspaceFolderPath(normalizedTargetPath);
+      if (knownWorkspacePath) {
+        return forwardBuddyApiCall(method, replacePathCandidateInArgs(args, knownWorkspacePath));
+      }
+      const selected = await promptForRemoteFolderPath(targetPath);
       const folderPath = selected?.[0];
       if (!folderPath) {
         return false;
