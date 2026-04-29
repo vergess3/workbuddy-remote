@@ -2286,9 +2286,39 @@ function renderWorkBuddyNativeShimJs({
     return /(minimi[sz]e|maximi[sz]e|restore|close|最小化|最大化|还原|关闭)/iu.test(label);
   }
 
+  function getDirectControlText(control) {
+    return String(control?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function isTopApplicationMenuControl(control) {
+    const text = getDirectControlText(control);
+    const label = getControlLabel(control);
+    if (/^(?:workbuddy|edit(?:\([a-z]\))?|window(?:\([a-z]\))?|help(?:\([a-z]\))?|编辑(?:\([a-z]\))?|窗口(?:\([a-z]\))?|帮助(?:\([a-z]\))?)$/iu.test(text)) {
+      return true;
+    }
+    return /^(?:workbuddy|edit|window|help|编辑|窗口|帮助)(?:\s|\(|$)/iu.test(label.trim());
+  }
+
+  function getTopApplicationMenuBottom() {
+    let bottom = 0;
+    const viewportLimit = Math.min(150, Math.max(72, window.innerHeight * 0.16));
+    for (const control of document.querySelectorAll("button,a,[role='button'],[role='menuitem'],[tabindex]")) {
+      if (!isTopApplicationMenuControl(control)) {
+        continue;
+      }
+      const rect = getVisibleElementRect(control);
+      if (rect && rect.top <= viewportLimit && rect.left <= window.innerWidth * 0.72) {
+        bottom = Math.max(bottom, rect.bottom);
+      }
+    }
+    return bottom;
+  }
+
   function getMobileMenuSearchBounds() {
+    const minY = Math.min(180, Math.max(40, getTopApplicationMenuBottom() + 4));
     return {
       x: Math.min(156, Math.max(104, window.innerWidth * 0.22)),
+      minY,
       y: Math.min(300, Math.max(150, window.innerHeight * 0.28)),
     };
   }
@@ -2303,7 +2333,7 @@ function renderWorkBuddyNativeShimJs({
       !rect ||
       rect.left < -8 ||
       rect.left > bounds.x ||
-      rect.top < 0 ||
+      rect.top < bounds.minY ||
       rect.top > bounds.y ||
       rect.width < 18 ||
       rect.height < 18 ||
@@ -2314,7 +2344,7 @@ function renderWorkBuddyNativeShimJs({
     }
 
     const label = getControlLabel(control).toLowerCase();
-    if (isLikelyWindowControlLabel(label)) {
+    if (isLikelyWindowControlLabel(label) || isTopApplicationMenuControl(control)) {
       return -1;
     }
     const text = String(control.textContent || "");
@@ -2363,7 +2393,7 @@ function renderWorkBuddyNativeShimJs({
       const sampleXs = [16, 28, 40, 56, 72, 92].filter((x) => x <= bounds.x);
       const sampleStep = 10;
       for (const x of sampleXs) {
-        for (let y = 28; y <= bounds.y; y += sampleStep) {
+        for (let y = bounds.minY; y <= bounds.y; y += sampleStep) {
           const control = getClickableControl(document.elementFromPoint(x, y));
           if (control) {
             hitCounts.set(control, (hitCounts.get(control) || 0) + 1);
