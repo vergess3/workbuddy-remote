@@ -277,6 +277,80 @@ function Test-BridgeReady {
     }
 }
 
+function Initialize-WindowMenuInterop {
+    if ("WorkBuddyRemote.NativeWindow" -as [type]) {
+        return
+    }
+
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace WorkBuddyRemote {
+    public static class NativeWindow {
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetMenu(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetMenu(IntPtr hWnd, IntPtr hMenu);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DrawMenuBar(IntPtr hWnd);
+    }
+}
+"@
+}
+
+function Hide-WorkBuddyNativeMenuBar {
+    param(
+        [int]$ProcessId = 0,
+        [int]$Retries = 30,
+        [int]$DelayMilliseconds = 250
+    )
+
+    try {
+        Initialize-WindowMenuInterop
+    }
+    catch {
+        Write-Host "Could not initialize native menu hider: $($_.Exception.Message)"
+        return
+    }
+
+    for ($i = 0; $i -lt $Retries; $i++) {
+        if ($ProcessId -gt 0) {
+            $processes = @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+        }
+        else {
+            $processes = @(Get-Process WorkBuddy -ErrorAction SilentlyContinue)
+        }
+
+        $removedAny = $false
+        foreach ($process in $processes) {
+            $windowHandle = $process.MainWindowHandle
+            if (-not $windowHandle -or $windowHandle -eq [IntPtr]::Zero) {
+                continue
+            }
+
+            $menuHandle = [WorkBuddyRemote.NativeWindow]::GetMenu($windowHandle)
+            if (-not $menuHandle -or $menuHandle -eq [IntPtr]::Zero) {
+                continue
+            }
+
+            [WorkBuddyRemote.NativeWindow]::SetMenu($windowHandle, [IntPtr]::Zero) | Out-Null
+            [WorkBuddyRemote.NativeWindow]::DrawMenuBar($windowHandle) | Out-Null
+            $removedAny = $true
+        }
+
+        if ($removedAny) {
+            return
+        }
+
+        Start-Sleep -Milliseconds $DelayMilliseconds
+    }
+}
+
 function Open-BridgeUrlSafely {
     param([string]$Url)
 
@@ -406,6 +480,7 @@ if ($KillWorkBuddyProcessesBeforeStart) {
 
 if (Test-PortListening -Port ([int]$CdpPort)) {
     Write-Host "Reusing existing WorkBuddy CDP port $CdpPort."
+    Hide-WorkBuddyNativeMenuBar -Retries 12
 }
 else {
     Write-Host "Launching WorkBuddy with CDP on port $CdpPort..."
@@ -427,6 +502,7 @@ else {
     if (-not $cdpReady) {
         throw "CDP port $CdpPort did not start listening in time."
     }
+    Hide-WorkBuddyNativeMenuBar -ProcessId $workBuddyPid
 }
 
 $nodePath = Find-NodeExecutable
