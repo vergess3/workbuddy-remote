@@ -439,7 +439,7 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
       const __workbuddyRemoteDrawerConfig = () => ({
         placement: "left",
         size: SIDEBAR_SIZE.EXPANDED_WIDTH,
-        showBackdrop: true,
+        showBackdrop: false,
         animationDuration: 300
       });
       globalThis.__workbuddyRemoteSetSidebarOpen = (open) => {
@@ -496,10 +496,12 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
       globalThis.__workbuddyRemoteGetSidebarState = () => {
         let drawerOpen = false;
         try { drawerOpen = Boolean(gridRef.current?.isDrawerOpen?.(sidebarGridViewRef.current)); } catch {}
+        const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 0 : 0;
+        const runtimeNarrowForSidebar = Boolean(isNarrowForSidebar || (viewportWidth > 0 && viewportWidth <= 820));
         return {
-          open: isLocalMode ? !workbuddyHidden : isNarrowForSidebar ? drawerOpen : sidebarExpanded,
+          open: isLocalMode ? !workbuddyHidden : runtimeNarrowForSidebar ? drawerOpen : sidebarExpanded,
           collapsed: isLocalMode ? workbuddyHidden : !sidebarExpanded,
-          narrow: isNarrowForSidebar,
+          narrow: runtimeNarrowForSidebar,
           local: isLocalMode
         };
       };
