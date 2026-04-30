@@ -507,6 +507,48 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
     if (patched.includes(sidebarToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleSidebar")) {
       patched = patched.replace(sidebarToggleExposeFrom, sidebarToggleExposeTo);
     }
+    const detailToggleExposeFrom = "\treturn {\n\t\tgridRef,";
+    const detailToggleExposeTo = `\tconst __workbuddyRemoteToggleDetailPanel = (0, import_react.useCallback)(() => {
+      const grid = gridRef.current;
+      const view = detailPanelViewRef.current;
+      if (!grid || !view) return false;
+      try {
+        if (isNarrowForDetail) {
+          const nextOpen = grid.toggleDrawer(view, detailDrawerConfig);
+          setShowDetailPanel(nextOpen);
+          return true;
+        }
+        const nextVisible = grid.toggleViewVisible(view);
+        setShowDetailPanel(nextVisible);
+        return true;
+      } catch {
+        return false;
+      }
+    }, [
+      isNarrowForDetail,
+      detailDrawerConfig,
+      containerSize.width
+    ]);
+    try {
+      globalThis.__workbuddyRemoteToggleDetailPanel = __workbuddyRemoteToggleDetailPanel;
+      globalThis.__workbuddyRemoteGetDetailPanelState = () => {
+        const grid = gridRef.current;
+        const view = detailPanelViewRef.current;
+        let drawerOpen = false;
+        let viewVisible = false;
+        try { drawerOpen = Boolean(grid?.isDrawerOpen?.(view)); } catch {}
+        try { viewVisible = Boolean(grid?.isViewVisible?.(view)); } catch {}
+        return {
+          open: isNarrowForDetail ? drawerOpen : viewVisible || Boolean(showDetailPanel),
+          narrow: Boolean(isNarrowForDetail)
+        };
+      };
+    } catch {}
+\treturn {
+\t\tgridRef,`;
+    if (patched.includes(detailToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleDetailPanel")) {
+      patched = patched.replace(detailToggleExposeFrom, detailToggleExposeTo);
+    }
   }
 
   sendVersionedScript(req, res, patched, {

@@ -46,7 +46,7 @@ function renderWorkBuddyNativeHtml(sourceHtml) {
   }
   html = html.replace(
     /\b(src|href)=(["']\.\/assets\/(?:index|setting)-[\w-]+\.js)(["'])/gu,
-    '$1=$2?wb-remote-patch=6$3'
+    '$1=$2?wb-remote-patch=7$3'
   );
   return html;
 }
@@ -2315,6 +2315,8 @@ function renderWorkBuddyNativeShimJs({
     lastActivationAt: 0,
     gesture: null,
     topBarTap: null,
+    suppressTopBarClickUntil: 0,
+    suppressTopBarClickCommand: "",
     refreshScheduled: false,
   };
 
@@ -2457,6 +2459,86 @@ function renderWorkBuddyNativeShimJs({
     const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
     const compact = rect.width <= 96 && rect.height <= 96;
     return hasNavigationCue || hasMenuGlyph || (compact && hasSvg) || rect.left <= 72;
+  }
+
+  function getMobileTopBarCommandForControl(control) {
+    if (!control || control.closest?.("[id^='wb-bridge-']") || !isTopBarInteractiveControl(control)) {
+      return "";
+    }
+    if (!control.closest?.(".teams-top-bar,.workbuddy-topbar")) {
+      return "";
+    }
+
+    const rect = control.getBoundingClientRect?.();
+    const label = getControlLabel(control).toLowerCase();
+    const text = String(control.textContent || "");
+    const inLeftGroup = Boolean(control.closest?.(".top-bar-left,.workbuddy-topbar-left"));
+    const inActionsGroup = Boolean(control.closest?.(".top-bar-actions,.workbuddy-topbar-actions"));
+    const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
+    const hasDetailIcon = Boolean(control.querySelector?.(".top-bar-detail-toggle-icon"));
+    const nearLeftEdge = rect ? rect.left <= 96 : false;
+    const nearRightEdge = rect ? window.innerWidth - rect.right <= 112 : false;
+
+    if (
+      hasDetailIcon ||
+      ((inActionsGroup || nearRightEdge) && /(detail|panel|详情|面板|文件|file)/u.test(label))
+    ) {
+      return "detail-toggle";
+    }
+
+    if (
+      (inLeftGroup || nearLeftEdge) &&
+      (
+        /(toggle.*sidebar|sidebar|menu|history|conversation|session|task|drawer|侧栏|菜单|历史|会话|对话|任务|展开|折叠)/u.test(label) ||
+        /[☰≡]/u.test(text) ||
+        (nearLeftEdge && hasSvg)
+      )
+    ) {
+      return "sidebar-toggle";
+    }
+
+    return "";
+  }
+
+  function suppressNativeMobileTopBarClick(command, durationMs = 900) {
+    mobileNavigationAssist.suppressTopBarClickUntil = Date.now() + durationMs;
+    mobileNavigationAssist.suppressTopBarClickCommand = command || "";
+  }
+
+  function shouldSuppressNativeMobileTopBarClick(command) {
+    if (Date.now() > mobileNavigationAssist.suppressTopBarClickUntil) {
+      return false;
+    }
+    const suppressedCommand = mobileNavigationAssist.suppressTopBarClickCommand;
+    return !suppressedCommand || !command || suppressedCommand === command;
+  }
+
+  function activateMobileTopBarCommand(command) {
+    if (command === "sidebar-toggle") {
+      return activateMobileNavigation(!getMobileSidebarOpenState());
+    }
+    if (command === "sidebar-open") {
+      return activateMobileNavigation(true);
+    }
+    if (command === "detail-toggle") {
+      const toggle = globalThis.__workbuddyRemoteToggleDetailPanel;
+      if (typeof toggle !== "function") {
+        return false;
+      }
+      try {
+        return toggle() !== false;
+      } catch (error) {
+        console.warn("[workbuddy-remote] Failed to toggle WorkBuddy detail panel:", error);
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function stopNativeEvent(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
   }
 
   function rememberMobileSidebarState(isOpen) {
@@ -2701,26 +2783,22 @@ function renderWorkBuddyNativeShimJs({
 
     if (dx > 0 && gesture.canOpen) {
       gesture.triggered = true;
-      event.preventDefault?.();
-      event.stopPropagation?.();
-      event.stopImmediatePropagation?.();
+      stopNativeEvent(event);
       activateMobileNavigation(true);
+      suppressNativeMobileTopBarClick("sidebar-toggle");
       return;
     }
     if (dx < 0 && gesture.canClose) {
       gesture.triggered = true;
-      event.preventDefault?.();
-      event.stopPropagation?.();
-      event.stopImmediatePropagation?.();
+      stopNativeEvent(event);
       activateMobileNavigation(false);
+      suppressNativeMobileTopBarClick("sidebar-toggle");
     }
   }
 
   function endMobileNavigationGesture(event) {
     if (mobileNavigationAssist.gesture?.triggered) {
-      event?.preventDefault?.();
-      event?.stopPropagation?.();
-      event?.stopImmediatePropagation?.();
+      stopNativeEvent(event);
     }
     mobileNavigationAssist.gesture = null;
   }
@@ -2732,7 +2810,8 @@ function renderWorkBuddyNativeShimJs({
     }
     const point = getEventClientPoint(event);
     const control = getClickableControlAtPoint(point.x, point.y);
-    if (!isTopBarInteractiveControl(control) && !isMobileNavigationTapIntent(point.x, point.y, control)) {
+    const command = getMobileTopBarCommandForControl(control);
+    if (!command && !isMobileNavigationTapIntent(point.x, point.y, control)) {
       mobileNavigationAssist.topBarTap = null;
       return;
     }
@@ -2740,6 +2819,7 @@ function renderWorkBuddyNativeShimJs({
       x: point.x,
       y: point.y,
       control,
+      command: command || "sidebar-open",
       time: Date.now(),
     };
   }
@@ -2757,30 +2837,39 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     const control = tap.control?.isConnected ? tap.control : getClickableControlAtPoint(point.x, point.y);
-    if (isMobileNavigationTapIntent(point.x, point.y, control) && Date.now() - mobileNavigationAssist.lastActivationAt >= 250) {
+    const command = tap.command || getMobileTopBarCommandForControl(control);
+    if (command && Date.now() - mobileNavigationAssist.lastActivationAt >= 250) {
       mobileNavigationAssist.gesture = null;
-      if (activateMobileNavigation(true)) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
+      if (activateMobileTopBarCommand(command)) {
+        suppressNativeMobileTopBarClick(command === "sidebar-open" ? "sidebar-toggle" : command);
+        stopNativeEvent(event);
         return;
       }
-    }
-    if (isTopBarInteractiveControl(control)) {
-      mobileNavigationAssist.gesture = null;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
-      dispatchSyntheticPointerMouseClick(control, point.x, point.y);
-      return;
     }
     if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
       if (activateMobileNavigation(true)) {
         mobileNavigationAssist.gesture = null;
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
+        suppressNativeMobileTopBarClick("sidebar-toggle");
+        stopNativeEvent(event);
       }
+    }
+  }
+
+  function handleMobileTopBarCommandClick(event) {
+    if (!isMobileTouchViewport()) {
+      return;
+    }
+    const control = getControlFromEvent(event);
+    const command = getMobileTopBarCommandForControl(control);
+    if (!command) {
+      return;
+    }
+    if (shouldSuppressNativeMobileTopBarClick(command)) {
+      stopNativeEvent(event);
+      return;
+    }
+    if (activateMobileTopBarCommand(command)) {
+      stopNativeEvent(event);
     }
   }
 
@@ -2797,6 +2886,7 @@ function renderWorkBuddyNativeShimJs({
     document.addEventListener("touchcancel", () => {
       mobileNavigationAssist.topBarTap = null;
     }, { capture: true, passive: true });
+    document.addEventListener("click", handleMobileTopBarCommandClick, true);
 
     document.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "mouse" || event.isPrimary === false) {
