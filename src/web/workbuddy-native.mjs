@@ -2348,9 +2348,9 @@ function renderWorkBuddyNativeShimJs({
       rect.width >= 12 &&
       rect.height >= 12 &&
       rect.top >= -8 &&
-      rect.top <= 112 &&
-      rect.bottom <= 156 &&
-      rect.height <= 112
+      rect.top <= 180 &&
+      rect.bottom <= 240 &&
+      rect.height <= 140
     );
   }
 
@@ -2372,15 +2372,30 @@ function renderWorkBuddyNativeShimJs({
   function getClickableControlAtPoint(x, y) {
     return withMobileHitTargetPassthrough(() => {
       const element = document.elementFromPoint?.(x, y);
-      if (!element?.closest) {
-        return null;
-      }
-      const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
-      if (!control || control.closest?.("[id^='wb-bridge-']")) {
-        return null;
-      }
-      return control;
+      return getClickableControlFromElement(element);
     });
+  }
+
+  function getClickableControlFromElement(element) {
+    if (!element?.closest) {
+      return null;
+    }
+    const selector = "button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]";
+    let current = element.closest(selector);
+    if (current?.closest?.("[id^='wb-bridge-']")) {
+      current = null;
+    }
+    for (let depth = 0, node = element; !current && node && node !== document.body && depth < 6; depth += 1, node = node.parentElement) {
+      if (node.closest?.("[id^='wb-bridge-']")) {
+        break;
+      }
+      const style = window.getComputedStyle?.(node);
+      if (typeof node.onclick === "function" || style?.cursor === "pointer") {
+        current = node;
+        break;
+      }
+    }
+    return current || null;
   }
 
   function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
@@ -2541,7 +2556,26 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function activateMobileNavigation(nextOpenState = null) {
-    return callWorkBuddyRemoteSidebarToggle(nextOpenState);
+    const activated = callWorkBuddyRemoteSidebarToggle(nextOpenState);
+    if (nextOpenState === true) {
+      scheduleMobileNavigationOpenRetry();
+    }
+    return activated;
+  }
+
+  function shouldRetryMobileNavigationOpen() {
+    const nativeState = readNativeMobileSidebarState();
+    return !nativeState || nativeState.open !== true;
+  }
+
+  function scheduleMobileNavigationOpenRetry() {
+    for (const delayMs of [80, 220, 520]) {
+      setTimeout(() => {
+        if (shouldRetryMobileNavigationOpen()) {
+          callWorkBuddyRemoteSidebarToggle(true);
+        }
+      }, delayMs);
+    }
   }
 
   function ensureMobileNavigationStyleSheet() {
@@ -2652,7 +2686,7 @@ function renderWorkBuddyNativeShimJs({
       mobileNavigationAssist.gesture = null;
       return;
     }
-    if (y <= 40) {
+    if (y <= 8) {
       mobileNavigationAssist.gesture = null;
       return;
     }
@@ -2832,11 +2866,14 @@ function renderWorkBuddyNativeShimJs({
     window.addEventListener("orientationchange", scheduleMobileNavigationRefresh, { passive: true });
   }
 
-  function isOpenFileManagerControlLabel(label) {
+  function isOpenFileManagerControlLabel(label, localPath = "") {
     if (/(本地文件|上传|附件|添加文件|upload|attach|add.*file|local.*file)/iu.test(label)) {
       return false;
     }
-    return /打开.*(文件夹|目录|文件)|在.*(文件管理器|资源管理器).*显示|文件管理器中显示|资源管理器中显示|open.*(folder|file)|show.*(folder|file)|reveal.*(explorer|folder|file)|folder.*open|file.*open/iu.test(label);
+    if (localPath && /打开.*文件|open.*file|file.*open/iu.test(label)) {
+      return true;
+    }
+    return /打开.*(文件夹|目录)|在.*(文件管理器|资源管理器).*显示|文件管理器中显示|资源管理器中显示|open.*folder|show.*(folder|file)|reveal.*(explorer|folder|file)|folder.*open/iu.test(label);
   }
 
   function getControlLocalPath(control) {
@@ -2867,7 +2904,7 @@ function renderWorkBuddyNativeShimJs({
 
     const label = getControlLabel(control);
     const localPath = getControlLocalPath(control);
-    if (isOpenFileManagerControlLabel(label)) {
+    if (isOpenFileManagerControlLabel(label, localPath)) {
       await openWorkspaceFileManagerOnce({ targetPath: localPath });
       return true;
     }
@@ -2915,7 +2952,8 @@ function renderWorkBuddyNativeShimJs({
         return;
       }
       const label = getControlLabel(control);
-      if (!isOpenFileManagerControlLabel(label)) {
+      const localPath = getControlLocalPath(control);
+      if (!isOpenFileManagerControlLabel(label, localPath)) {
         return;
       }
       event.preventDefault();
