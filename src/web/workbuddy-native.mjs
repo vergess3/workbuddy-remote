@@ -2327,6 +2327,104 @@ function renderWorkBuddyNativeShimJs({
     ));
   }
 
+  function getEventClientPoint(event) {
+    const touch = event.changedTouches?.[0] || event.touches?.[0];
+    const clientX = Number.isFinite(touch?.clientX) ? touch.clientX : event.clientX;
+    const clientY = Number.isFinite(touch?.clientY) ? touch.clientY : event.clientY;
+    return {
+      x: Number.isFinite(clientX) ? clientX : 0,
+      y: Number.isFinite(clientY) ? clientY : 0,
+    };
+  }
+
+  function isTopBarInteractiveTarget(element) {
+    if (!element?.closest) {
+      return false;
+    }
+    const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
+    if (!control) {
+      return false;
+    }
+    if (control.closest?.("[id^='wb-bridge-']")) {
+      return true;
+    }
+    const rect = control.getBoundingClientRect?.();
+    return Boolean(rect && rect.width > 0 && rect.height > 0 && rect.top <= 96 && rect.height <= 96);
+  }
+
+  function withMobileHitTargetPassthrough(callback) {
+    const hitTarget = mobileNavigationAssist.hitTarget;
+    const previousPointerEvents = hitTarget?.style?.pointerEvents;
+    if (hitTarget) {
+      hitTarget.style.setProperty("pointer-events", "none", "important");
+    }
+    try {
+      return callback();
+    } finally {
+      if (hitTarget) {
+        hitTarget.style.setProperty("pointer-events", previousPointerEvents || "auto", "important");
+      }
+    }
+  }
+
+  function getClickableControlAtPoint(x, y) {
+    return withMobileHitTargetPassthrough(() => {
+      const element = document.elementFromPoint?.(x, y);
+      if (!element?.closest) {
+        return null;
+      }
+      const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
+      if (!control || control.closest?.("[id^='wb-bridge-']")) {
+        return null;
+      }
+      return control;
+    });
+  }
+
+  function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
+    if (!control) {
+      return false;
+    }
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY,
+      screenX: window.screenX + clientX,
+      screenY: window.screenY + clientY,
+      button: 0,
+      buttons: 1,
+    };
+    const dispatch = (type, EventConstructor, init = eventInit) => {
+      try {
+        control.dispatchEvent(new EventConstructor(type, init));
+      } catch {
+        control.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+    };
+    if (typeof PointerEvent !== "undefined") {
+      dispatch("pointerdown", PointerEvent, { ...eventInit, pointerId: 1, pointerType: "touch", isPrimary: true });
+    }
+    dispatch("mousedown", MouseEvent);
+    if (typeof PointerEvent !== "undefined") {
+      dispatch("pointerup", PointerEvent, { ...eventInit, buttons: 0, pointerId: 1, pointerType: "touch", isPrimary: true });
+    }
+    dispatch("mouseup", MouseEvent, { ...eventInit, buttons: 0 });
+    dispatch("click", MouseEvent, { ...eventInit, buttons: 0, detail: 1 });
+    return true;
+  }
+
+  function hideMobileNavigationHitTarget() {
+    const hitTarget = mobileNavigationAssist.hitTarget;
+    if (!hitTarget?.style) {
+      return;
+    }
+    hitTarget.style.setProperty("display", "none", "important");
+    hitTarget.style.setProperty("pointer-events", "none", "important");
+  }
+
   function rememberMobileSidebarState(isOpen) {
     mobileNavigationAssist.lastKnownOpen = Boolean(isOpen);
     mobileNavigationAssist.lastKnownOpenAt = Date.now();
@@ -2432,7 +2530,7 @@ function renderWorkBuddyNativeShimJs({
     element.dataset.workbuddyRemoteMobileNavigationTouch = "true";
     element.setAttribute?.("draggable", "false");
     const declarations = [
-      ["touch-action", "none"],
+      ["touch-action", "manipulation"],
       ["-webkit-tap-highlight-color", "transparent"],
       ["-webkit-user-drag", "none"],
       ["-webkit-user-select", "none"],
@@ -2456,23 +2554,34 @@ function renderWorkBuddyNativeShimJs({
     hitTarget.type = "button";
     hitTarget.tabIndex = -1;
     hitTarget.setAttribute("aria-label", "Toggle navigation");
-    hitTarget.style.cssText = "position:fixed;z-index:2147483647;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;";
+    hitTarget.style.cssText = "position:fixed;z-index:2147483647;left:0;top:0;width:76px;height:64px;min-width:0!important;min-height:0!important;max-width:76px!important;max-height:64px!important;box-sizing:border-box;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;border-radius:0;";
     applyMobileNavigationTouchHandling(hitTarget);
     const activate = (event) => {
       if (!isMobileTouchViewport()) {
         return;
       }
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
       if (Date.now() - mobileNavigationAssist.lastActivationAt < 750) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
         return;
       }
-      activateMobileNavigation(true);
+      if (activateMobileNavigation(true)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        return;
+      }
+      const point = getEventClientPoint(event);
+      const fallbackControl = getClickableControlAtPoint(point.x, point.y);
+      hideMobileNavigationHitTarget();
+      if (dispatchSyntheticPointerMouseClick(fallbackControl, point.x, point.y)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+      }
     };
-    hitTarget.addEventListener("pointerdown", activate, true);
     hitTarget.addEventListener("pointerup", activate, true);
-    hitTarget.addEventListener("touchstart", activate, { capture: true, passive: false });
     hitTarget.addEventListener("touchend", activate, { capture: true, passive: false });
     hitTarget.addEventListener("click", activate, true);
     document.body.appendChild(hitTarget);
@@ -2483,7 +2592,7 @@ function renderWorkBuddyNativeShimJs({
   function refreshMobileNavigationHitTarget() {
     mobileNavigationAssist.refreshScheduled = false;
     if (!isMobileTouchViewport() || !document.body) {
-      mobileNavigationAssist.hitTarget?.style.setProperty("display", "none", "important");
+      hideMobileNavigationHitTarget();
       return;
     }
     ensureMobileNavigationStyleSheet();
@@ -2494,12 +2603,16 @@ function renderWorkBuddyNativeShimJs({
       top: band.top + "px",
       width: band.width + "px",
       height: band.height + "px",
+      minWidth: "0",
+      minHeight: "0",
+      maxWidth: band.width + "px",
+      maxHeight: band.height + "px",
       display: "block",
       pointerEvents: "auto",
     };
     for (const [name, value] of Object.entries(nextStyle)) {
       if (hitTarget.style[name] !== value) {
-        hitTarget.style[name] = value;
+        hitTarget.style.setProperty(name.replace(/[A-Z]/g, (letter) => "-" + letter.toLowerCase()), value, "important");
       }
     }
   }
@@ -2531,7 +2644,7 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function startMobileNavigationGesture(x, y, target) {
-    if (!isMobileTouchViewport() || isEditableTarget(target)) {
+    if (!isMobileTouchViewport() || isEditableTarget(target) || isTopBarInteractiveTarget(target)) {
       mobileNavigationAssist.gesture = null;
       return;
     }
@@ -2542,8 +2655,8 @@ function renderWorkBuddyNativeShimJs({
     const menuOpen = getMobileSidebarOpenState();
     const openEdge = getMobileNavigationOpenSwipeEdge();
     const closeEdge = Math.min(420, Math.max(220, window.innerWidth * 0.82));
-    const canOpen = x <= openEdge;
-    const canClose = x <= closeEdge;
+    const canOpen = !menuOpen && x <= openEdge;
+    const canClose = menuOpen && x <= closeEdge;
     mobileNavigationAssist.gesture = canOpen || canClose
       ? {
           x,
