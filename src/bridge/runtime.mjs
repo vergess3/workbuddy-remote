@@ -22,6 +22,18 @@ const CDP_MAX_PAYLOAD_BYTES = readPositiveIntegerEnv(
   ["WORKBUDDY_REMOTE_CDP_MAX_PAYLOAD_BYTES", "WORKBUDDY_REMOTE_MAX_PAYLOAD_BYTES"],
   512 * 1024 * 1024
 );
+const CDP_INLINE_JSON_CHARS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_CDP_INLINE_JSON_CHARS"],
+  512 * 1024
+);
+const CDP_CHUNK_CHARS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_CDP_CHUNK_CHARS"],
+  1024 * 1024
+);
+const BROWSER_SOCKET_CHUNK_CHARS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_BROWSER_WS_CHUNK_CHARS", "WORKBUDDY_REMOTE_WS_CHUNK_CHARS"],
+  1024 * 1024
+);
 const BUDDY_API_TIMEOUT_MS_BY_METHOD = new Map([
   ["createSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
   ["loadSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
@@ -88,6 +100,12 @@ function isBuddyApiTimeoutRetrySafe(method) {
     return true;
   }
   return /^(?:get|list|configGet|storageGet|workspaceGet|workspaceSearch|workspaceCheck|authGet|connectorGet|connectorHas|growthGet|inspiration(?:List|Detail|SettingsGet|OnboardingCheck)|skill(?:Get|List)|pluginGet|migrationGet)/u.test(value);
+}
+
+function createTransferId(prefix) {
+  return `${prefix}-${process.pid}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
 }
 
 function resolvePowerShellExePath() {
@@ -441,7 +459,11 @@ class CdpClient {
           });
         }
 
-        if (globalThis.__workbuddyBridge?.__workbuddyRemoteNativeOnly) {
+        const bridgeVersion = 2;
+        if (
+          globalThis.__workbuddyBridge?.__workbuddyRemoteNativeOnly &&
+          globalThis.__workbuddyBridge.__workbuddyRemoteVersion >= bridgeVersion
+        ) {
           return "already";
         }
 
@@ -522,9 +544,52 @@ class CdpClient {
         };
 
         const buddyApiListeners = new Map();
+        const storedArgs = new Map();
+        const storedResults = new Map();
+        let storedResultSeq = 0;
+        const inlineJsonMaxChars = ${CDP_INLINE_JSON_CHARS};
+        const maxStoreAgeMs = 5 * 60 * 1000;
+
+        const cleanupStores = () => {
+          const expiresBefore = Date.now() - maxStoreAgeMs;
+          for (const [id, entry] of storedArgs.entries()) {
+            if ((entry.createdAt || 0) < expiresBefore) {
+              storedArgs.delete(id);
+            }
+          }
+          for (const [id, entry] of storedResults.entries()) {
+            if ((entry.createdAt || 0) < expiresBefore) {
+              storedResults.delete(id);
+            }
+          }
+        };
+
+        const makeChunkedResult = (payload) => {
+          cleanupStores();
+          const raw = JSON.stringify(payload);
+          if (raw.length <= inlineJsonMaxChars) {
+            return {
+              kind: "inline-json",
+              payload,
+              length: raw.length,
+            };
+          }
+
+          const id = "result-" + Date.now().toString(36) + "-" + (++storedResultSeq).toString(36);
+          storedResults.set(id, {
+            raw,
+            createdAt: Date.now(),
+          });
+          return {
+            kind: "chunked-json",
+            id,
+            length: raw.length,
+          };
+        };
 
         globalThis.__workbuddyBridge = {
           __workbuddyRemoteNativeOnly: true,
+          __workbuddyRemoteVersion: bridgeVersion,
 
           getHostKind() {
             if (globalThis.buddyAPI && typeof globalThis.buddyAPI === "object") {
@@ -537,12 +602,62 @@ class CdpClient {
             return Reflect.ownKeys(globalThis.buddyAPI || {}).map(String);
           },
 
+          beginStoredArgs(id) {
+            cleanupStores();
+            storedArgs.set(id, {
+              raw: "",
+              createdAt: Date.now(),
+            });
+            return true;
+          },
+
+          appendStoredArgsChunk(id, chunk) {
+            const entry = storedArgs.get(id);
+            if (!entry) {
+              throw new Error("Stored WorkBuddy bridge args were not found: " + id);
+            }
+            entry.raw += String(chunk || "");
+            entry.createdAt = Date.now();
+            return entry.raw.length;
+          },
+
+          releaseStoredArgs(id) {
+            storedArgs.delete(id);
+            return true;
+          },
+
+          readStoredResultChunk(id, offset, length) {
+            const entry = storedResults.get(id);
+            if (!entry) {
+              throw new Error("Stored WorkBuddy bridge result was not found: " + id);
+            }
+            entry.createdAt = Date.now();
+            return entry.raw.slice(offset, offset + length);
+          },
+
+          releaseStoredResult(id) {
+            storedResults.delete(id);
+            return true;
+          },
+
           async callBuddyApi(method, args) {
             const fn = globalThis.buddyAPI?.[method];
             if (typeof fn !== "function") {
               throw new Error("WorkBuddy buddyAPI method is unavailable: " + method);
             }
             return encode(await fn(...decode(args || [])));
+          },
+
+          async callBuddyApiChunked(method, args) {
+            return makeChunkedResult(await this.callBuddyApi(method, args));
+          },
+
+          async callBuddyApiWithStoredArgs(method, id) {
+            const entry = storedArgs.get(id);
+            if (!entry) {
+              throw new Error("Stored WorkBuddy bridge args were not found: " + id);
+            }
+            return makeChunkedResult(await this.callBuddyApi(method, JSON.parse(entry.raw || "[]")));
           },
 
           subscribeBuddyApi(method, key, args) {
@@ -704,6 +819,7 @@ class BridgeRuntime {
     this.browserSockets = new Set();
     this.browserSocketIds = new Map();
     this.browserSocketSeq = 0;
+    this.browserSocketChunkSeq = 0;
     this.browserSocketSubscriptions = new Map();
     this.buddyApiSubscriptionRefCounts = new Map();
     this.warmupPromise = null;
@@ -937,7 +1053,44 @@ class BridgeRuntime {
     }
 
     try {
-      socket.send(JSON.stringify(message));
+      const raw = JSON.stringify(message);
+      if (raw.length <= BROWSER_SOCKET_CHUNK_CHARS) {
+        socket.send(raw);
+        return true;
+      }
+
+      const transferId = `server-${process.pid}-${++this.browserSocketChunkSeq}`;
+      const totalChunks = Math.ceil(raw.length / BROWSER_SOCKET_CHUNK_CHARS);
+      socket.send(
+        JSON.stringify({
+          type: "bridge-message-chunk-start",
+          transferId,
+          totalChunks,
+          totalLength: raw.length,
+        })
+      );
+      for (let offset = 0, index = 0; offset < raw.length; offset += BROWSER_SOCKET_CHUNK_CHARS, index += 1) {
+        socket.send(
+          JSON.stringify({
+            type: "bridge-message-chunk",
+            transferId,
+            index,
+            data: raw.slice(offset, offset + BROWSER_SOCKET_CHUNK_CHARS),
+          })
+        );
+      }
+      socket.send(
+        JSON.stringify({
+          type: "bridge-message-chunk-end",
+          transferId,
+        })
+      );
+      logger.info("runtime.browser_socket.chunked_send", "Sent chunked browser WebSocket message", {
+        socketId: this.browserSocketIds.get(socket),
+        transferId,
+        totalLength: raw.length,
+        totalChunks,
+      });
       return true;
     } catch (error) {
       logger.warn("runtime.browser_socket.send_error", "Failed to send browser WebSocket message", {
@@ -1053,19 +1206,139 @@ class BridgeRuntime {
     }
   }
 
+  async storeBuddyApiArgsForCdp(rawArgs, timeoutMs) {
+    const id = createTransferId("args");
+    await this.cdp.evaluate(
+      `globalThis.__workbuddyBridge.beginStoredArgs(${JSON.stringify(id)})`,
+      { timeoutMs }
+    );
+
+    for (let offset = 0; offset < rawArgs.length; offset += CDP_CHUNK_CHARS) {
+      const chunk = rawArgs.slice(offset, offset + CDP_CHUNK_CHARS);
+      await this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.appendStoredArgsChunk(${JSON.stringify(id)}, ${JSON.stringify(
+          chunk
+        )})`,
+        { timeoutMs }
+      );
+    }
+
+    return id;
+  }
+
+  async releaseStoredBuddyApiArgs(id, timeoutMs) {
+    if (!id) {
+      return;
+    }
+
+    try {
+      await this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.releaseStoredArgs(${JSON.stringify(id)})`,
+        { timeoutMs }
+      );
+    } catch (error) {
+      logger.debug("buddy_api.args.release_error", "Failed to release stored WorkBuddy args", {
+        id,
+        error,
+      });
+    }
+  }
+
+  async releaseStoredBuddyApiResult(id, timeoutMs) {
+    if (!id) {
+      return;
+    }
+
+    try {
+      await this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.releaseStoredResult(${JSON.stringify(id)})`,
+        { timeoutMs }
+      );
+    } catch (error) {
+      logger.debug("buddy_api.result.release_error", "Failed to release stored WorkBuddy result", {
+        id,
+        error,
+      });
+    }
+  }
+
+  async readBuddyApiResultEnvelope(envelope, timeoutMs) {
+    if (!envelope || typeof envelope !== "object") {
+      return envelope;
+    }
+
+    if (envelope.kind === "inline-json") {
+      return envelope.payload;
+    }
+
+    if (envelope.kind !== "chunked-json") {
+      return envelope;
+    }
+
+    const id = envelope.id;
+    const totalLength = Math.max(0, Math.trunc(Number(envelope.length) || 0));
+    let raw = "";
+    try {
+      for (let offset = 0; offset < totalLength; offset += CDP_CHUNK_CHARS) {
+        const length = Math.min(CDP_CHUNK_CHARS, totalLength - offset);
+        const chunk = await this.cdp.evaluate(
+          `globalThis.__workbuddyBridge.readStoredResultChunk(${JSON.stringify(
+            id
+          )}, ${offset}, ${length})`,
+          { timeoutMs }
+        );
+        raw += typeof chunk === "string" ? chunk : "";
+      }
+
+      logger.info("buddy_api.result.chunked", "Read chunked WorkBuddy buddyAPI result", {
+        id,
+        totalLength,
+        chunks: Math.ceil(totalLength / CDP_CHUNK_CHARS),
+      });
+      return JSON.parse(raw);
+    } finally {
+      await this.releaseStoredBuddyApiResult(id, timeoutMs);
+    }
+  }
+
+  async invokeBuddyApiOverCdp(method, args, timeoutMs) {
+    const rawArgs = JSON.stringify(args || []);
+    let storedArgsId = "";
+    try {
+      let expression;
+      if (rawArgs.length <= CDP_INLINE_JSON_CHARS) {
+        expression = `globalThis.__workbuddyBridge.callBuddyApiChunked(${JSON.stringify(
+          method
+        )}, ${rawArgs})`;
+      } else {
+        storedArgsId = await this.storeBuddyApiArgsForCdp(rawArgs, timeoutMs);
+        logger.info("buddy_api.args.chunked", "Sent chunked WorkBuddy buddyAPI args over CDP", {
+          method,
+          totalLength: rawArgs.length,
+          chunks: Math.ceil(rawArgs.length / CDP_CHUNK_CHARS),
+        });
+        expression = `globalThis.__workbuddyBridge.callBuddyApiWithStoredArgs(${JSON.stringify(
+          method
+        )}, ${JSON.stringify(storedArgsId)})`;
+      }
+
+      const envelope = await this.cdp.evaluate(expression, { timeoutMs });
+      return this.readBuddyApiResultEnvelope(envelope, timeoutMs);
+    } finally {
+      await this.releaseStoredBuddyApiArgs(storedArgsId, timeoutMs);
+    }
+  }
+
   async invokeBuddyApi(method, args) {
     logger.debug("buddy_api.invoke", "Invoking WorkBuddy buddyAPI method", {
       method,
       args: summarizeBuddyApiPayload(method, args),
     });
-    const expression = `globalThis.__workbuddyBridge.callBuddyApi(${JSON.stringify(
-      method
-    )}, ${JSON.stringify(args || [])})`;
     try {
       const timeoutMs = getBuddyApiTimeoutMs(method);
       const retrySafe = isBuddyApiTimeoutRetrySafe(method);
       const result = await this.withCdpRecovery(
-        () => this.cdp.evaluate(expression, { timeoutMs }),
+        () => this.invokeBuddyApiOverCdp(method, args, timeoutMs),
         {
           recover: retrySafe,
           recoverTimeouts: retrySafe,

@@ -447,6 +447,9 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
         const grid = gridRef.current;
         const view = sidebarGridViewRef.current;
         if (!grid || !view) return false;
+        const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 0 : 0;
+        const runtimeNarrowForSidebar = Boolean(isNarrowForSidebar || (viewportWidth > 0 && viewportWidth <= 820));
+        const runtimeNarrowForDetail = Boolean(isNarrowForDetail || (viewportWidth > 0 && viewportWidth <= 980));
         if (isLocalMode) {
           __workbuddyRemoteAnimateSidebar();
           if (nextOpen) {
@@ -462,9 +465,9 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
           try { localStorage.setItem(SIDEBAR_STORAGE_KEY, String(nextOpen)); } catch {}
           return true;
         }
-        if (isNarrowForSidebar) {
+        if (runtimeNarrowForSidebar) {
           if (nextOpen) {
-            if (isNarrowForDetail && detailPanelViewRef.current) {
+            if (runtimeNarrowForDetail && detailPanelViewRef.current) {
               try {
                 if (grid.isDrawerOpen?.(detailPanelViewRef.current)) grid.closeDrawer(detailPanelViewRef.current);
               } catch {}
@@ -854,6 +857,7 @@ function attachWebSocketServer(server, runtime, auth) {
     runtime.registerBrowserSocket(socket);
 
     socket.on("close", (code, reason) => {
+      incomingChunks.clear();
       logger.info("websocket.close", "Browser WebSocket closed", {
         code,
         reason: reason ? reason.toString() : "",
@@ -864,21 +868,9 @@ function attachWebSocketServer(server, runtime, auth) {
       logger.warn("websocket.error", "Browser WebSocket reported an error", { error });
     });
 
-    socket.on("message", async (raw) => {
-      let message;
-      try {
-        message = JSON.parse(raw.toString());
-      } catch {
-        logger.warn("websocket.browser_to_bridge.invalid_json", "Invalid browser WebSocket payload", {
-          bytes: raw?.byteLength ?? raw?.length,
-        });
-        runtime.sendToSocket(socket, {
-          ok: false,
-          error: "Invalid JSON",
-        });
-        return;
-      }
+    const incomingChunks = new Map();
 
+    const handleBrowserMessage = async (message) => {
       logger.debug("websocket.browser_to_bridge", "Browser sent bridge message", {
         message: summarizeMessage(message),
       });
@@ -956,6 +948,108 @@ function attachWebSocketServer(server, runtime, auth) {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    };
+
+    const handleChunkFrame = (message) => {
+      if (message.type === "bridge-client-message-chunk-start") {
+        incomingChunks.set(message.transferId, {
+          chunks: [],
+          totalChunks: Math.max(0, Math.trunc(Number(message.totalChunks) || 0)),
+          totalLength: Math.max(0, Math.trunc(Number(message.totalLength) || 0)),
+          received: 0,
+        });
+        return true;
+      }
+
+      if (message.type === "bridge-client-message-chunk") {
+        const entry = incomingChunks.get(message.transferId);
+        if (!entry) {
+          logger.warn("websocket.browser_to_bridge.chunk_missing", "Browser WebSocket chunk had no start frame", {
+            transferId: message.transferId,
+            index: message.index,
+          });
+          return true;
+        }
+        const index = Math.trunc(Number(message.index) || 0);
+        const data = typeof message.data === "string" ? message.data : "";
+        entry.chunks[index] = data;
+        entry.received += 1;
+        return true;
+      }
+
+      if (message.type !== "bridge-client-message-chunk-end") {
+        return false;
+      }
+
+      const entry = incomingChunks.get(message.transferId);
+      incomingChunks.delete(message.transferId);
+      if (!entry) {
+        logger.warn("websocket.browser_to_bridge.chunk_end_missing", "Browser WebSocket chunk end had no start frame", {
+          transferId: message.transferId,
+        });
+        return true;
+      }
+
+      const raw = entry.chunks.join("");
+      if (entry.totalLength && raw.length !== entry.totalLength) {
+        logger.warn("websocket.browser_to_bridge.chunk_length_mismatch", "Browser WebSocket chunked message length differed", {
+          transferId: message.transferId,
+          expected: entry.totalLength,
+          actual: raw.length,
+        });
+      }
+
+      let completed;
+      try {
+        completed = JSON.parse(raw);
+      } catch {
+        logger.warn("websocket.browser_to_bridge.invalid_chunked_json", "Invalid chunked browser WebSocket payload", {
+          transferId: message.transferId,
+          bytes: raw.length,
+        });
+        runtime.sendToSocket(socket, {
+          ok: false,
+          error: "Invalid chunked JSON",
+        });
+        return true;
+      }
+
+      logger.info("websocket.browser_to_bridge.chunked_receive", "Received chunked browser WebSocket message", {
+        transferId: message.transferId,
+        totalLength: raw.length,
+        totalChunks: entry.totalChunks,
+        receivedChunks: entry.received,
+        message: summarizeMessage(completed),
+      });
+      handleBrowserMessage(completed).catch((error) => {
+        logger.error("websocket.browser_to_bridge.chunked_handle_error", "Failed to handle chunked browser WebSocket message", {
+          transferId: message.transferId,
+          error,
+        });
+      });
+      return true;
+    };
+
+    socket.on("message", async (raw) => {
+      let message;
+      try {
+        message = JSON.parse(raw.toString());
+      } catch {
+        logger.warn("websocket.browser_to_bridge.invalid_json", "Invalid browser WebSocket payload", {
+          bytes: raw?.byteLength ?? raw?.length,
+        });
+        runtime.sendToSocket(socket, {
+          ok: false,
+          error: "Invalid JSON",
+        });
+        return;
+      }
+
+      if (handleChunkFrame(message)) {
+        return;
+      }
+
+      await handleBrowserMessage(message);
     });
   });
 

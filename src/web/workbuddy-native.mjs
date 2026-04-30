@@ -69,6 +69,9 @@ function renderWorkBuddyNativeShimJs({
   const maskBridgeModelSecrets = ${JSON.stringify(maskBridgeModelSecrets === true)};
   const pending = new Map();
   const listeners = new Map();
+  const incomingChunkedMessages = new Map();
+  let outgoingChunkSeq = 0;
+  const wsChunkChars = 1024 * 1024;
   let socket = null;
   let readyPromise = null;
   let requestId = 0;
@@ -2348,9 +2351,9 @@ function renderWorkBuddyNativeShimJs({
       rect.width >= 12 &&
       rect.height >= 12 &&
       rect.top >= -8 &&
-      rect.top <= 180 &&
-      rect.bottom <= 240 &&
-      rect.height <= 140
+      rect.top <= 112 &&
+      rect.bottom <= 156 &&
+      rect.height <= 112
     );
   }
 
@@ -2372,30 +2375,15 @@ function renderWorkBuddyNativeShimJs({
   function getClickableControlAtPoint(x, y) {
     return withMobileHitTargetPassthrough(() => {
       const element = document.elementFromPoint?.(x, y);
-      return getClickableControlFromElement(element);
+      if (!element?.closest) {
+        return null;
+      }
+      const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
+      if (!control || control.closest?.("[id^='wb-bridge-']")) {
+        return null;
+      }
+      return control;
     });
-  }
-
-  function getClickableControlFromElement(element) {
-    if (!element?.closest) {
-      return null;
-    }
-    const selector = "button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]";
-    let current = element.closest(selector);
-    if (current?.closest?.("[id^='wb-bridge-']")) {
-      current = null;
-    }
-    for (let depth = 0, node = element; !current && node && node !== document.body && depth < 6; depth += 1, node = node.parentElement) {
-      if (node.closest?.("[id^='wb-bridge-']")) {
-        break;
-      }
-      const style = window.getComputedStyle?.(node);
-      if (typeof node.onclick === "function" || style?.cursor === "pointer") {
-        current = node;
-        break;
-      }
-    }
-    return current || null;
   }
 
   function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
@@ -2556,26 +2544,7 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function activateMobileNavigation(nextOpenState = null) {
-    const activated = callWorkBuddyRemoteSidebarToggle(nextOpenState);
-    if (nextOpenState === true) {
-      scheduleMobileNavigationOpenRetry();
-    }
-    return activated;
-  }
-
-  function shouldRetryMobileNavigationOpen() {
-    const nativeState = readNativeMobileSidebarState();
-    return !nativeState || nativeState.open !== true;
-  }
-
-  function scheduleMobileNavigationOpenRetry() {
-    for (const delayMs of [80, 220, 520]) {
-      setTimeout(() => {
-        if (shouldRetryMobileNavigationOpen()) {
-          callWorkBuddyRemoteSidebarToggle(true);
-        }
-      }, delayMs);
-    }
+    return callWorkBuddyRemoteSidebarToggle(nextOpenState);
   }
 
   function ensureMobileNavigationStyleSheet() {
@@ -2686,7 +2655,7 @@ function renderWorkBuddyNativeShimJs({
       mobileNavigationAssist.gesture = null;
       return;
     }
-    if (y <= 8) {
+    if (y <= 40) {
       mobileNavigationAssist.gesture = null;
       return;
     }
@@ -3559,6 +3528,140 @@ function renderWorkBuddyNativeShimJs({
     }).catch(() => {});
   }
 
+  function handleBridgeMessage(message) {
+    if (message.id && pending.has(message.id)) {
+      const entry = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.ok === false) {
+        entry.reject(new Error(message.error || "WorkBuddy bridge request failed"));
+      } else {
+        entry.resolve(decodeTransport(message.result));
+      }
+      return;
+    }
+
+    if (message.type === "buddy-api-event") {
+      const key = message.key || message.method;
+      const args = (message.args || []).map(decodeTransport);
+      if (isAuthUrlEvent(message)) {
+        openAuthUrlInUserBrowser(args);
+      }
+      const callbacks = listeners.get(key);
+      if (!callbacks) {
+        return;
+      }
+      for (const callback of [...callbacks]) {
+        try {
+          callback(...args);
+        } catch (error) {
+          console.error("[workbuddy-remote] listener failed", error);
+        }
+      }
+      return;
+    }
+
+    if (message.type === "workspace-upload-progress") {
+      pendingUploadProgress.get(message.uploadId)?.(message);
+      return;
+    }
+
+    if (message.type === "open-file-manager") {
+      openWorkspaceFileManagerOnce({ targetPath: message.targetPath || message.url }).catch((error) => {
+        console.error("[workbuddy-remote] file manager failed", error);
+        window.alert(error instanceof Error ? error.message : String(error));
+      });
+      return;
+    }
+
+    if (message.type === "open-external" && typeof message.url === "string") {
+      if (fileManagerEnabled && isLocalPathLike(message.url)) {
+        openWorkspaceFileManagerOnce({ targetPath: message.url }).catch((error) => {
+          console.error("[workbuddy-remote] file manager failed", error);
+          window.alert(error instanceof Error ? error.message : String(error));
+        });
+        return;
+      }
+      window.open(message.url, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  function handleIncomingChunkFrame(message) {
+    if (message.type === "bridge-message-chunk-start") {
+      incomingChunkedMessages.set(message.transferId, {
+        chunks: [],
+        totalChunks: Math.max(0, Math.trunc(Number(message.totalChunks) || 0)),
+        totalLength: Math.max(0, Math.trunc(Number(message.totalLength) || 0)),
+      });
+      return true;
+    }
+
+    if (message.type === "bridge-message-chunk") {
+      const entry = incomingChunkedMessages.get(message.transferId);
+      if (!entry) {
+        console.warn("[workbuddy-remote] chunk frame without start", message.transferId);
+        return true;
+      }
+      const index = Math.trunc(Number(message.index) || 0);
+      entry.chunks[index] = typeof message.data === "string" ? message.data : "";
+      return true;
+    }
+
+    if (message.type !== "bridge-message-chunk-end") {
+      return false;
+    }
+
+    const entry = incomingChunkedMessages.get(message.transferId);
+    incomingChunkedMessages.delete(message.transferId);
+    if (!entry) {
+      console.warn("[workbuddy-remote] chunk end without start", message.transferId);
+      return true;
+    }
+
+    const raw = entry.chunks.join("");
+    if (entry.totalLength && raw.length !== entry.totalLength) {
+      console.warn("[workbuddy-remote] chunked message length mismatch", {
+        transferId: message.transferId,
+        expected: entry.totalLength,
+        actual: raw.length,
+      });
+    }
+
+    try {
+      handleBridgeMessage(JSON.parse(raw));
+    } catch (error) {
+      console.error("[workbuddy-remote] failed to parse chunked bridge message", error);
+    }
+    return true;
+  }
+
+  function sendRawBridgeMessage(raw) {
+    if (raw.length <= wsChunkChars) {
+      socket.send(raw);
+      return;
+    }
+
+    const transferId = "client-" + Date.now().toString(36) + "-" + (++outgoingChunkSeq).toString(36);
+    const totalChunks = Math.ceil(raw.length / wsChunkChars);
+    socket.send(JSON.stringify({
+      type: "bridge-client-message-chunk-start",
+      transferId,
+      totalChunks,
+      totalLength: raw.length,
+    }));
+    for (let offset = 0, index = 0; offset < raw.length; offset += wsChunkChars, index += 1) {
+      socket.send(JSON.stringify({
+        type: "bridge-client-message-chunk",
+        transferId,
+        index,
+        data: raw.slice(offset, offset + wsChunkChars),
+      }));
+    }
+    socket.send(JSON.stringify({
+      type: "bridge-client-message-chunk-end",
+      transferId,
+    }));
+  }
+
   function connect() {
     if (socket && socket.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -3587,6 +3690,7 @@ function renderWorkBuddyNativeShimJs({
           entry.reject(new Error("WorkBuddy bridge WebSocket closed"));
         }
         pending.clear();
+        incomingChunkedMessages.clear();
         socket = null;
         readyPromise = null;
       });
@@ -3599,60 +3703,11 @@ function renderWorkBuddyNativeShimJs({
           return;
         }
 
-        if (message.id && pending.has(message.id)) {
-          const entry = pending.get(message.id);
-          pending.delete(message.id);
-          if (message.ok === false) {
-            entry.reject(new Error(message.error || "WorkBuddy bridge request failed"));
-          } else {
-            entry.resolve(decodeTransport(message.result));
-          }
+        if (handleIncomingChunkFrame(message)) {
           return;
         }
 
-        if (message.type === "buddy-api-event") {
-          const key = message.key || message.method;
-          const args = (message.args || []).map(decodeTransport);
-          if (isAuthUrlEvent(message)) {
-            openAuthUrlInUserBrowser(args);
-          }
-          const callbacks = listeners.get(key);
-          if (!callbacks) {
-            return;
-          }
-          for (const callback of [...callbacks]) {
-            try {
-              callback(...args);
-            } catch (error) {
-              console.error("[workbuddy-remote] listener failed", error);
-            }
-          }
-          return;
-        }
-
-        if (message.type === "workspace-upload-progress") {
-          pendingUploadProgress.get(message.uploadId)?.(message);
-          return;
-        }
-
-        if (message.type === "open-file-manager") {
-          openWorkspaceFileManagerOnce({ targetPath: message.targetPath || message.url }).catch((error) => {
-            console.error("[workbuddy-remote] file manager failed", error);
-            window.alert(error instanceof Error ? error.message : String(error));
-          });
-          return;
-        }
-
-        if (message.type === "open-external" && typeof message.url === "string") {
-          if (fileManagerEnabled && isLocalPathLike(message.url)) {
-            openWorkspaceFileManagerOnce({ targetPath: message.url }).catch((error) => {
-              console.error("[workbuddy-remote] file manager failed", error);
-              window.alert(error instanceof Error ? error.message : String(error));
-            });
-            return;
-          }
-          window.open(message.url, "_blank", "noopener,noreferrer");
-        }
+        handleBridgeMessage(message);
       });
     });
 
@@ -3665,7 +3720,12 @@ function renderWorkBuddyNativeShimJs({
     const message = { ...payload, id };
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      socket.send(JSON.stringify(message));
+      try {
+        sendRawBridgeMessage(JSON.stringify(message));
+      } catch (error) {
+        pending.delete(id);
+        reject(error);
+      }
     });
   }
 
