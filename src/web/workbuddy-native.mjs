@@ -2165,6 +2165,55 @@ function renderWorkBuddyNativeShimJs({
     return fileManagerOpenPromise;
   }
 
+  let workBuddyMenuBarObserver = null;
+
+  function injectWorkBuddyMenuBarHiderStyle() {
+    if (document.getElementById("wb-bridge-hide-menubar-style")) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.id = "wb-bridge-hide-menubar-style";
+    style.textContent = \`
+      #workbuddy-menubar-container,
+      .codebuddy-menubar {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        overflow: hidden !important;
+        pointer-events: none !important;
+      }
+    \`;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function hideWorkBuddyMenuBar() {
+    injectWorkBuddyMenuBarHiderStyle();
+    for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar")) {
+      element.dataset.workbuddyRemoteMenuBarHidden = "true";
+      element.style.setProperty("display", "none", "important");
+      element.style.setProperty("visibility", "hidden", "important");
+      element.style.setProperty("height", "0", "important");
+      element.style.setProperty("pointer-events", "none", "important");
+    }
+  }
+
+  function installWorkBuddyMenuBarHider() {
+    hideWorkBuddyMenuBar();
+    if (workBuddyMenuBarObserver || !document.documentElement) {
+      return;
+    }
+    workBuddyMenuBarObserver = new MutationObserver(() => hideWorkBuddyMenuBar());
+    workBuddyMenuBarObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["id", "style", "class"],
+    });
+  }
+
   function isWindowControlCandidate(element) {
     if (!element || element.id === "wb-bridge-file-manager-button" || element.id === "wb-bridge-restart-button") {
       return false;
@@ -2845,9 +2894,11 @@ function renderWorkBuddyNativeShimJs({
   }
 
   installSensitiveFieldMasker();
+  installWorkBuddyMenuBarHider();
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
+      installWorkBuddyMenuBarHider();
       installWindowControlHider();
       installSensitiveFieldMasker();
       installMobileNavigationAssist();
@@ -2858,6 +2909,7 @@ function renderWorkBuddyNativeShimJs({
       });
     }, { once: true });
   } else {
+    installWorkBuddyMenuBarHider();
     installWindowControlHider();
     installSensitiveFieldMasker();
     installMobileNavigationAssist();

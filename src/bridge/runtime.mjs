@@ -374,6 +374,36 @@ class CdpClient {
           globalThis.workbuddyBridgeNotify(JSON.stringify(payload));
         };
 
+        const hideWorkBuddyMenuBar = () => {
+          try {
+            if (!document.getElementById("wb-bridge-hide-menubar-style")) {
+              const style = document.createElement("style");
+              style.id = "wb-bridge-hide-menubar-style";
+              style.textContent = "#workbuddy-menubar-container,.codebuddy-menubar{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;pointer-events:none!important;}";
+              (document.head || document.documentElement).appendChild(style);
+            }
+
+            for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar")) {
+              element.dataset.workbuddyRemoteMenuBarHidden = "true";
+              element.style.setProperty("display", "none", "important");
+              element.style.setProperty("visibility", "hidden", "important");
+              element.style.setProperty("height", "0", "important");
+              element.style.setProperty("pointer-events", "none", "important");
+            }
+          } catch {}
+        };
+
+        hideWorkBuddyMenuBar();
+        if (!globalThis.__workbuddyRemoteMenuBarObserver && typeof MutationObserver === "function") {
+          globalThis.__workbuddyRemoteMenuBarObserver = new MutationObserver(hideWorkBuddyMenuBar);
+          globalThis.__workbuddyRemoteMenuBarObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["id", "style", "class"],
+          });
+        }
+
         const buddyApiListeners = new Map();
 
         globalThis.__workbuddyBridge = {
