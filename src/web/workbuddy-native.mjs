@@ -2854,7 +2854,7 @@ function renderWorkBuddyNativeShimJs({
     if (!icon) {
       return;
     }
-    if (icon.dataset.wbBridgeFileManagerIcon !== "true" || icon.innerHTML !== fileManagerMenuIconSvg) {
+    if (icon.dataset.wbBridgeFileManagerIcon !== "true") {
       icon.innerHTML = fileManagerMenuIconSvg;
       icon.dataset.wbBridgeFileManagerIcon = "true";
     }
@@ -2960,9 +2960,9 @@ function renderWorkBuddyNativeShimJs({
 
     const footer = document.querySelector(".user-menu-popover .user-menu-footer");
     const logoutItem =
-      footer?.querySelector(".user-menu-item--logout") ||
+      footer?.querySelector(".user-menu-item--logout:not([data-wb-bridge-restart-menu-entry='true'])") ||
       [...(footer?.querySelectorAll("[role='button'],.user-menu-item") || [])]
-        .find((item) => /退出登录|退出登陆|Logout|Sign out/iu.test(getCompactText(item)));
+        .find((item) => item.dataset.wbBridgeRestartMenuEntry !== "true" && /退出登录|退出登陆|Logout|Sign out/iu.test(getCompactText(item)));
     if (!footer || !logoutItem) {
       return;
     }
@@ -2990,7 +2990,7 @@ function renderWorkBuddyNativeShimJs({
     entry.setAttribute("aria-disabled", restartInProgress ? "true" : "false");
     entry.style.cursor = restartInProgress ? "default" : "pointer";
     entry.style.opacity = restartInProgress ? ".6" : "";
-    if (entry.nextElementSibling !== logoutItem) {
+    if (entry !== logoutItem && entry.nextElementSibling !== logoutItem) {
       footer.insertBefore(entry, logoutItem);
     }
   }
@@ -3007,7 +3007,11 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     integratedRemoteControlsSyncScheduled = true;
-    queueMicrotask(syncIntegratedRemoteControls);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(syncIntegratedRemoteControls);
+    } else {
+      setTimeout(syncIntegratedRemoteControls, 0);
+    }
   }
 
   function installIntegratedRemoteControls() {
