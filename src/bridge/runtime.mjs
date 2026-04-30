@@ -14,6 +14,81 @@ const RESTART_HELPER_SCRIPT_PATH = path.resolve(
   "tools",
   "workbuddy-restart-instance.ps1"
 );
+const CDP_COMMAND_TIMEOUT_MS = 8000;
+const WORKBUDDY_RPC_DEFAULT_TIMEOUT_MS = 35_000;
+const WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS = 95_000;
+const WORKBUDDY_RPC_PROMPT_TIMEOUT_MS = 1_805_000;
+const CDP_MAX_PAYLOAD_BYTES = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_CDP_MAX_PAYLOAD_BYTES", "WORKBUDDY_REMOTE_MAX_PAYLOAD_BYTES"],
+  512 * 1024 * 1024
+);
+const BUDDY_API_TIMEOUT_MS_BY_METHOD = new Map([
+  ["createSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
+  ["loadSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
+  ["prompt", WORKBUDDY_RPC_PROMPT_TIMEOUT_MS],
+]);
+const BUDDY_API_TIMEOUT_RETRY_SAFE_METHODS = new Set([
+  "authGetAccountUsage",
+  "authGetOauthUser",
+  "configGet",
+  "configGetAll",
+  "configGetLocalCustomModels",
+  "connectorGetConfigs",
+  "connectorGetStates",
+  "connectorGetTaskConnector",
+  "connectorGetUserConnector",
+  "connectorHasOAuthToken",
+  "getAccount",
+  "getAppLocale",
+  "getAppPlatform",
+  "getAppVersion",
+  "getAvailableCommands",
+  "getMessageQueue",
+  "getQueueState",
+  "getSession",
+  "getSessionArtifacts",
+  "getSessionTeamRuntime",
+  "getSubagentList",
+  "getUserInfo",
+  "growthGetBuddy",
+  "inspirationDetail",
+  "inspirationList",
+  "inspirationOnboardingCheck",
+  "inspirationSettingsGet",
+  "listSessions",
+  "storageGetSessions",
+  "storageGetWorkspaces",
+  "workspaceCheckPathExists",
+  "workspaceGetCurrent",
+  "workspaceSearchFile",
+]);
+
+function readPositiveIntegerEnv(names, fallback) {
+  const candidates = Array.isArray(names) ? names : [names];
+  for (const name of candidates) {
+    const raw = process.env[name];
+    if (!raw) {
+      continue;
+    }
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return fallback;
+}
+
+function getBuddyApiTimeoutMs(method) {
+  return BUDDY_API_TIMEOUT_MS_BY_METHOD.get(String(method || "")) || WORKBUDDY_RPC_DEFAULT_TIMEOUT_MS;
+}
+
+function isBuddyApiTimeoutRetrySafe(method) {
+  const value = String(method || "");
+  if (BUDDY_API_TIMEOUT_RETRY_SAFE_METHODS.has(value)) {
+    return true;
+  }
+  return /^(?:get|list|configGet|storageGet|workspaceGet|workspaceSearch|workspaceCheck|authGet|connectorGet|connectorHas|growthGet|inspiration(?:List|Detail|SettingsGet|OnboardingCheck)|skill(?:Get|List)|pluginGet|migrationGet)/u.test(value);
+}
 
 function resolvePowerShellExePath() {
   const systemRoot = process.env.SystemRoot || "C:\\Windows";
@@ -180,7 +255,7 @@ class CdpClient {
     this.seq = 0;
     this.pending = new Map();
     this.bindingHandlers = new Set();
-    this.commandTimeoutMs = 8000;
+    this.commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS;
     this.connectPromise = null;
   }
 
@@ -193,7 +268,11 @@ class CdpClient {
     }
 
     this.connectPromise = (async () => {
-      this.ws = new WebSocket(this.wsUrl);
+      this.ws = new WebSocket(this.wsUrl, {
+        maxPayload: CDP_MAX_PAYLOAD_BYTES,
+        perMessageDeflate: false,
+      });
+      this.ws.on("error", (error) => this.#handleSocketError(error));
 
       await new Promise((resolve, reject) => {
         const onOpen = () => {
@@ -213,11 +292,12 @@ class CdpClient {
       });
 
       this.ws.on("message", (buffer) => this.#handleMessage(buffer.toString()));
-      this.ws.on("close", () => {
-        for (const { reject } of this.pending.values()) {
-          reject(new Error("CDP connection closed"));
-        }
-        this.pending.clear();
+      this.ws.on("close", (code, reason) => {
+        this.#rejectPending(
+          new Error(
+            `CDP connection closed${code ? ` (${code}${reason ? `: ${reason.toString()}` : ""})` : ""}`
+          )
+        );
       });
 
       await this.send("Runtime.enable");
@@ -246,38 +326,60 @@ class CdpClient {
     };
   }
 
-  async send(method, params = {}) {
+  async send(method, params = {}, { timeoutMs = this.commandTimeoutMs } = {}) {
+    timeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, Math.trunc(timeoutMs)) : this.commandTimeoutMs;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("CDP connection closed");
     }
 
     const id = ++this.seq;
-    this.ws.send(JSON.stringify({ id, method, params }));
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`));
-      }, this.commandTimeoutMs);
+      let timeout = null;
+      if (timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }
 
       this.pending.set(id, {
         method,
         resolve: (message) => {
-          clearTimeout(timeout);
+          if (timeout) {
+            clearTimeout(timeout);
+          }
           resolve(message);
         },
         reject: (error) => {
-          clearTimeout(timeout);
+          if (timeout) {
+            clearTimeout(timeout);
+          }
           reject(error);
         },
       });
+
+      try {
+        this.ws.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.pending.delete(id);
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        reject(error);
+      }
     });
   }
 
-  async evaluate(expression, { awaitPromise = true, returnByValue = true } = {}) {
+  async evaluate(
+    expression,
+    { awaitPromise = true, returnByValue = true, timeoutMs = this.commandTimeoutMs } = {}
+  ) {
     const response = await this.send("Runtime.evaluate", {
       expression,
       awaitPromise,
       returnByValue,
+    }, {
+      timeoutMs,
     });
 
     if (response.result?.exceptionDetails) {
@@ -523,6 +625,18 @@ class CdpClient {
       }
     }
   }
+
+  #rejectPending(error) {
+    for (const { reject } of this.pending.values()) {
+      reject(error);
+    }
+    this.pending.clear();
+  }
+
+  #handleSocketError(error) {
+    logger.warn("cdp.websocket.error", "CDP WebSocket reported an error", { error });
+    this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+  }
 }
 
 function isWorkBuddyRendererTarget(entry) {
@@ -749,17 +863,20 @@ class BridgeRuntime {
     );
   }
 
-  isRecoverableCdpError(error) {
+  isRecoverableCdpError(error, { recoverTimeouts = true } = {}) {
     if (!(error instanceof Error)) {
       return false;
     }
 
     const message = error.message || "";
+    if (message.includes("timed out after")) {
+      return recoverTimeouts;
+    }
     return (
       message.includes("CDP connection closed") ||
+      message.includes("CDP WebSocket error") ||
       message.includes("Target closed") ||
       message.includes("Session closed") ||
-      message.includes("timed out after") ||
       message.includes("Cannot find context with specified id") ||
       message.includes("Inspected target navigated or closed") ||
       message.includes("No web contents for the given target id") ||
@@ -767,12 +884,12 @@ class BridgeRuntime {
     );
   }
 
-  async withCdpRecovery(operation) {
+  async withCdpRecovery(operation, { recover = true, recoverTimeouts = true } = {}) {
     await this.ensureCdpReady();
     try {
       return await operation();
     } catch (error) {
-      if (!this.isRecoverableCdpError(error)) {
+      if (!recover || !this.isRecoverableCdpError(error, { recoverTimeouts })) {
         throw error;
       }
 
@@ -819,8 +936,16 @@ class BridgeRuntime {
       return false;
     }
 
-    socket.send(JSON.stringify(message));
-    return true;
+    try {
+      socket.send(JSON.stringify(message));
+      return true;
+    } catch (error) {
+      logger.warn("runtime.browser_socket.send_error", "Failed to send browser WebSocket message", {
+        socketId: this.browserSocketIds.get(socket),
+        error,
+      });
+      return false;
+    }
   }
 
   broadcast(message) {
@@ -937,7 +1062,15 @@ class BridgeRuntime {
       method
     )}, ${JSON.stringify(args || [])})`;
     try {
-      const result = await this.withCdpRecovery(() => this.cdp.evaluate(expression));
+      const timeoutMs = getBuddyApiTimeoutMs(method);
+      const retrySafe = isBuddyApiTimeoutRetrySafe(method);
+      const result = await this.withCdpRecovery(
+        () => this.cdp.evaluate(expression, { timeoutMs }),
+        {
+          recover: retrySafe,
+          recoverTimeouts: retrySafe,
+        }
+      );
       logger.debug("buddy_api.invoke.result", "WorkBuddy buddyAPI invoke completed", {
         method,
         result: summarizeBuddyApiPayload(method, result),

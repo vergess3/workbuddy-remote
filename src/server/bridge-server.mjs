@@ -39,6 +39,10 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATED_STATIC_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const COMPRESSIBLE_EXTENSIONS = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg"]);
 const MAX_COMPRESSED_STATIC_ASSET_BYTES = 32 * 1024 * 1024;
+const BROWSER_WS_MAX_PAYLOAD_BYTES = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_BROWSER_WS_MAX_PAYLOAD_BYTES", "WORKBUDDY_REMOTE_MAX_PAYLOAD_BYTES"],
+  512 * 1024 * 1024
+);
 const versionedScriptCompressionCache = new Map();
 const WORKBUDDY_ASAR_PATH = resolveWorkBuddyAsarPath();
 const workBuddyAsar = new AsarArchive(WORKBUDDY_ASAR_PATH);
@@ -55,6 +59,21 @@ const MODEL_SECRET_WRITE_METHODS = new Set([
 ]);
 const REDACTED_MODEL_API_KEY = "workbuddy-remote-redacted-api-key";
 const REDACTED_MODEL_ENDPOINT = "https://workbuddy-remote.local/redacted/chat/completions";
+
+function readPositiveIntegerEnv(names, fallback) {
+  const candidates = Array.isArray(names) ? names : [names];
+  for (const name of candidates) {
+    const raw = process.env[name];
+    if (!raw) {
+      continue;
+    }
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return fallback;
+}
 
 async function loadFeatureFlags() {
   const config = await loadConfig();
@@ -821,7 +840,10 @@ function createRequestHandler(runtime, auth) {
 }
 
 function attachWebSocketServer(server, runtime, auth) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: BROWSER_WS_MAX_PAYLOAD_BYTES,
+  });
   const modelSecretProtector = createModelSecretProtector();
 
   wss.on("connection", (socket) => {
