@@ -2432,6 +2432,30 @@ function renderWorkBuddyNativeShimJs({
     return x >= band.left && x <= band.right && y >= band.top && y <= band.bottom;
   }
 
+  function isMobileNavigationTapIntent(x, y, control) {
+    if (x > Math.min(124, Math.max(84, window.innerWidth * 0.28)) || y > 176) {
+      return false;
+    }
+    if (isPointInMobileNavigationHitBand(x, y)) {
+      return true;
+    }
+    if (!control) {
+      return y <= 128;
+    }
+    const rect = control.getBoundingClientRect?.();
+    if (!rect || rect.left > 116 || rect.top > 144 || rect.width > 148 || rect.height > 120) {
+      return false;
+    }
+    const label = getControlLabel(control).toLowerCase();
+    const text = String(control.textContent || "");
+    const className = String(control.className || "").toLowerCase();
+    const hasNavigationCue = /(menu|sidebar|history|session|conversation|task|nav|drawer|菜单|侧栏|历史|会话|对话|任务|展开|折叠)/u.test(label + " " + className);
+    const hasMenuGlyph = /[☰≡]/u.test(text);
+    const hasSvg = Boolean(control.matches?.("svg") || control.querySelector?.("svg"));
+    const compact = rect.width <= 96 && rect.height <= 96;
+    return hasNavigationCue || hasMenuGlyph || (compact && hasSvg) || rect.left <= 72;
+  }
+
   function rememberMobileSidebarState(isOpen) {
     mobileNavigationAssist.lastKnownOpen = Boolean(isOpen);
     mobileNavigationAssist.lastKnownOpenAt = Date.now();
@@ -2705,7 +2729,7 @@ function renderWorkBuddyNativeShimJs({
     }
     const point = getEventClientPoint(event);
     const control = getClickableControlAtPoint(point.x, point.y);
-    if (!isTopBarInteractiveControl(control) && !isPointInMobileNavigationHitBand(point.x, point.y)) {
+    if (!isTopBarInteractiveControl(control) && !isMobileNavigationTapIntent(point.x, point.y, control)) {
       mobileNavigationAssist.topBarTap = null;
       return;
     }
@@ -2730,15 +2754,21 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     const control = tap.control?.isConnected ? tap.control : getClickableControlAtPoint(point.x, point.y);
+    if (isMobileNavigationTapIntent(point.x, point.y, control) && Date.now() - mobileNavigationAssist.lastActivationAt >= 250) {
+      mobileNavigationAssist.gesture = null;
+      if (activateMobileNavigation(true)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        return;
+      }
+    }
     if (isTopBarInteractiveControl(control)) {
       mobileNavigationAssist.gesture = null;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
       dispatchSyntheticPointerMouseClick(control, point.x, point.y);
-      if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
-        activateMobileNavigation(true);
-      }
       return;
     }
     if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
