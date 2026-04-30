@@ -2598,8 +2598,30 @@ function renderWorkBuddyNativeShimJs({
 
   function refreshMobileNavigationHitTarget() {
     mobileNavigationAssist.refreshScheduled = false;
+    if (!isMobileTouchViewport() || !document.body) {
+      hideMobileNavigationHitTarget();
+      return;
+    }
     ensureMobileNavigationStyleSheet();
-    hideMobileNavigationHitTarget();
+    const hitTarget = ensureMobileNavigationHitTarget();
+    const band = getMobileNavigationHitBand();
+    const nextStyle = {
+      left: band.left + "px",
+      top: band.top + "px",
+      width: band.width + "px",
+      height: band.height + "px",
+      minWidth: "0",
+      minHeight: "0",
+      maxWidth: band.width + "px",
+      maxHeight: band.height + "px",
+      display: "block",
+      pointerEvents: "auto",
+    };
+    for (const [name, value] of Object.entries(nextStyle)) {
+      if (hitTarget.style[name] !== value) {
+        hitTarget.style.setProperty(name.replace(/[A-Z]/g, (letter) => "-" + letter.toLowerCase()), value, "important");
+      }
+    }
   }
 
   function scheduleMobileNavigationRefresh() {
@@ -2710,7 +2732,7 @@ function renderWorkBuddyNativeShimJs({
     }
     const point = getEventClientPoint(event);
     const control = getClickableControlAtPoint(point.x, point.y);
-    if (!isMobileNavigationTapIntent(point.x, point.y, control)) {
+    if (!isTopBarInteractiveControl(control) && !isMobileNavigationTapIntent(point.x, point.y, control)) {
       mobileNavigationAssist.topBarTap = null;
       return;
     }
@@ -2743,6 +2765,14 @@ function renderWorkBuddyNativeShimJs({
         event.stopImmediatePropagation?.();
         return;
       }
+    }
+    if (isTopBarInteractiveControl(control)) {
+      mobileNavigationAssist.gesture = null;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      dispatchSyntheticPointerMouseClick(control, point.x, point.y);
+      return;
     }
     if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
       if (activateMobileNavigation(true)) {
