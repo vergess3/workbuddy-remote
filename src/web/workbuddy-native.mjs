@@ -2161,15 +2161,7 @@ function renderWorkBuddyNativeShimJs({
   }
 
   let workBuddyMenuBarObserver = null;
-
-  function injectWorkBuddyMenuBarHiderStyle() {
-    let style = document.getElementById("wb-bridge-hide-menubar-style");
-    if (!style) {
-      style = document.createElement("style");
-      style.id = "wb-bridge-hide-menubar-style";
-      (document.head || document.documentElement).appendChild(style);
-    }
-    style.textContent = \`
+  const workBuddyMenuBarHiderCss = \`
       #workbuddy-menubar-container,
       .codebuddy-menubar,
       #workbuddy-window-controls-container,
@@ -2193,6 +2185,17 @@ function renderWorkBuddyNativeShimJs({
         min-height: 100vh !important;
       }
     \`;
+
+  function injectWorkBuddyMenuBarHiderStyle() {
+    let style = document.getElementById("wb-bridge-hide-menubar-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "wb-bridge-hide-menubar-style";
+      (document.head || document.documentElement).appendChild(style);
+    }
+    if (style.textContent !== workBuddyMenuBarHiderCss) {
+      style.textContent = workBuddyMenuBarHiderCss;
+    }
   }
 
   function hideWorkBuddyMenuBar() {
@@ -2226,7 +2229,7 @@ function renderWorkBuddyNativeShimJs({
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["id", "style", "class"],
+      attributeFilter: ["id", "class"],
     });
   }
 
@@ -2833,9 +2836,13 @@ function renderWorkBuddyNativeShimJs({
       item.querySelector("[class*='_label_']") ||
       textLeaves.at(-1);
     if (target) {
-      target.textContent = label;
+      if (target.textContent !== label) {
+        target.textContent = label;
+      }
     } else {
-      item.textContent = label;
+      if (item.textContent !== label) {
+        item.textContent = label;
+      }
     }
   }
 

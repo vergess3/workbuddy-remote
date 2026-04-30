@@ -294,6 +294,8 @@ class CdpClient {
   async ensureBridgeInjected() {
     await this.evaluate(
       `(() => {
+        const workBuddyMenuBarHiderCss = "#workbuddy-menubar-container,.codebuddy-menubar,#workbuddy-window-controls-container,.workbuddy-window-controls{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;pointer-events:none!important;}#root{margin-top:0!important;height:100vh!important;min-height:100vh!important;}.teams-container,#root>.teams-container{height:100vh!important;min-height:100vh!important;}";
+
         const hideWorkBuddyMenuBar = () => {
           try {
             let style = document.getElementById("wb-bridge-hide-menubar-style");
@@ -302,7 +304,9 @@ class CdpClient {
               style.id = "wb-bridge-hide-menubar-style";
               (document.head || document.documentElement).appendChild(style);
             }
-            style.textContent = "#workbuddy-menubar-container,.codebuddy-menubar,#workbuddy-window-controls-container,.workbuddy-window-controls{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;pointer-events:none!important;}#root{margin-top:0!important;height:100vh!important;min-height:100vh!important;}.teams-container,#root>.teams-container{height:100vh!important;min-height:100vh!important;}";
+            if (style.textContent !== workBuddyMenuBarHiderCss) {
+              style.textContent = workBuddyMenuBarHiderCss;
+            }
 
             const root = document.getElementById("root");
             if (root) {
@@ -331,7 +335,7 @@ class CdpClient {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["id", "style", "class"],
+            attributeFilter: ["id", "class"],
           });
         }
 
