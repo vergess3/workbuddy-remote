@@ -294,6 +294,47 @@ class CdpClient {
   async ensureBridgeInjected() {
     await this.evaluate(
       `(() => {
+        const hideWorkBuddyMenuBar = () => {
+          try {
+            let style = document.getElementById("wb-bridge-hide-menubar-style");
+            if (!style) {
+              style = document.createElement("style");
+              style.id = "wb-bridge-hide-menubar-style";
+              (document.head || document.documentElement).appendChild(style);
+            }
+            style.textContent = "#workbuddy-menubar-container,.codebuddy-menubar,#workbuddy-window-controls-container,.workbuddy-window-controls{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;pointer-events:none!important;}#root{margin-top:0!important;height:100vh!important;min-height:100vh!important;}.teams-container,#root>.teams-container{height:100vh!important;min-height:100vh!important;}";
+
+            const root = document.getElementById("root");
+            if (root) {
+              root.style.setProperty("margin-top", "0", "important");
+              root.style.setProperty("height", "100vh", "important");
+              root.style.setProperty("min-height", "100vh", "important");
+            }
+            for (const element of document.querySelectorAll(".teams-container")) {
+              element.style.setProperty("height", "100vh", "important");
+              element.style.setProperty("min-height", "100vh", "important");
+            }
+            for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar,#workbuddy-window-controls-container,.workbuddy-window-controls")) {
+              element.dataset.workbuddyRemoteMenuBarHidden = "true";
+              element.style.setProperty("display", "none", "important");
+              element.style.setProperty("visibility", "hidden", "important");
+              element.style.setProperty("height", "0", "important");
+              element.style.setProperty("pointer-events", "none", "important");
+            }
+          } catch {}
+        };
+
+        hideWorkBuddyMenuBar();
+        if (!globalThis.__workbuddyRemoteMenuBarObserver && typeof MutationObserver === "function") {
+          globalThis.__workbuddyRemoteMenuBarObserver = new MutationObserver(hideWorkBuddyMenuBar);
+          globalThis.__workbuddyRemoteMenuBarObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["id", "style", "class"],
+          });
+        }
+
         if (globalThis.__workbuddyBridge?.__workbuddyRemoteNativeOnly) {
           return "already";
         }
@@ -373,36 +414,6 @@ class CdpClient {
         const notify = (payload) => {
           globalThis.workbuddyBridgeNotify(JSON.stringify(payload));
         };
-
-        const hideWorkBuddyMenuBar = () => {
-          try {
-            if (!document.getElementById("wb-bridge-hide-menubar-style")) {
-              const style = document.createElement("style");
-              style.id = "wb-bridge-hide-menubar-style";
-              style.textContent = "#workbuddy-menubar-container,.codebuddy-menubar{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;pointer-events:none!important;}";
-              (document.head || document.documentElement).appendChild(style);
-            }
-
-            for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar")) {
-              element.dataset.workbuddyRemoteMenuBarHidden = "true";
-              element.style.setProperty("display", "none", "important");
-              element.style.setProperty("visibility", "hidden", "important");
-              element.style.setProperty("height", "0", "important");
-              element.style.setProperty("pointer-events", "none", "important");
-            }
-          } catch {}
-        };
-
-        hideWorkBuddyMenuBar();
-        if (!globalThis.__workbuddyRemoteMenuBarObserver && typeof MutationObserver === "function") {
-          globalThis.__workbuddyRemoteMenuBarObserver = new MutationObserver(hideWorkBuddyMenuBar);
-          globalThis.__workbuddyRemoteMenuBarObserver.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ["id", "style", "class"],
-          });
-        }
 
         const buddyApiListeners = new Map();
 

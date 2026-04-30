@@ -374,11 +374,6 @@ function renderWorkBuddyNativeShimJs({
     setTimeout(() => toast.remove(), 4500);
   }
 
-  function applyFloatingActionButtonStyle(button, rightPx, disabled = false, background = "rgba(24,31,53,.96)", textColor = "#eef2ff") {
-    button.style.cssText = "position:fixed;top:5px;right:" + rightPx + "px;z-index:2147483645;height:26px;padding:0 8px;border:none;border-radius:999px;background:" + background + ";color:" + textColor + ";font:10px/1 'Segoe UI',sans-serif;font-weight:700;box-shadow:0 10px 30px rgba(0,0,0,.25);cursor:" + (disabled ? "default" : "pointer") + ";display:flex;align-items:center;gap:6px;opacity:" + (disabled ? ".55" : ".92") + ";pointer-events:" + (disabled ? "none" : "auto") + ";";
-    button.disabled = disabled;
-  }
-
   function fetchJson(url, options = {}) {
     return fetch(url, { cache: "no-store", ...options }).then(async (response) => {
       const payload = await response.json().catch(() => ({}));
@@ -2168,15 +2163,17 @@ function renderWorkBuddyNativeShimJs({
   let workBuddyMenuBarObserver = null;
 
   function injectWorkBuddyMenuBarHiderStyle() {
-    if (document.getElementById("wb-bridge-hide-menubar-style")) {
-      return;
+    let style = document.getElementById("wb-bridge-hide-menubar-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "wb-bridge-hide-menubar-style";
+      (document.head || document.documentElement).appendChild(style);
     }
-
-    const style = document.createElement("style");
-    style.id = "wb-bridge-hide-menubar-style";
     style.textContent = \`
       #workbuddy-menubar-container,
-      .codebuddy-menubar {
+      .codebuddy-menubar,
+      #workbuddy-window-controls-container,
+      .workbuddy-window-controls {
         display: none !important;
         visibility: hidden !important;
         height: 0 !important;
@@ -2185,13 +2182,32 @@ function renderWorkBuddyNativeShimJs({
         overflow: hidden !important;
         pointer-events: none !important;
       }
+      #root {
+        margin-top: 0 !important;
+        height: 100vh !important;
+        min-height: 100vh !important;
+      }
+      .teams-container,
+      #root > .teams-container {
+        height: 100vh !important;
+        min-height: 100vh !important;
+      }
     \`;
-    (document.head || document.documentElement).appendChild(style);
   }
 
   function hideWorkBuddyMenuBar() {
     injectWorkBuddyMenuBarHiderStyle();
-    for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar")) {
+    const root = document.getElementById("root");
+    if (root) {
+      root.style.setProperty("margin-top", "0", "important");
+      root.style.setProperty("height", "100vh", "important");
+      root.style.setProperty("min-height", "100vh", "important");
+    }
+    for (const element of document.querySelectorAll(".teams-container")) {
+      element.style.setProperty("height", "100vh", "important");
+      element.style.setProperty("min-height", "100vh", "important");
+    }
+    for (const element of document.querySelectorAll("#workbuddy-menubar-container,.codebuddy-menubar,#workbuddy-window-controls-container,.workbuddy-window-controls")) {
       element.dataset.workbuddyRemoteMenuBarHidden = "true";
       element.style.setProperty("display", "none", "important");
       element.style.setProperty("visibility", "hidden", "important");
@@ -2785,82 +2801,210 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     restartInProgress = true;
-    ensureRestartButton();
+    scheduleIntegratedRemoteControlsSync();
     setBridgeStatus(t("restartStarting"));
     try {
       await request({ type: "restart-app" });
       setBridgeStatus(t("restartStarting"));
     } catch (error) {
       restartInProgress = false;
-      ensureRestartButton();
+      scheduleIntegratedRemoteControlsSync();
       throw error;
     }
   }
 
-  function ensureFileManagerButton() {
-    let button = document.getElementById("wb-bridge-file-manager-button");
-    if (!fileManagerEnabled) {
-      button?.remove();
-      return;
-    }
-    if (!button) {
-      button = document.createElement("button");
-      button.id = "wb-bridge-file-manager-button";
-      button.type = "button";
-      button.addEventListener("click", () => {
-        openWorkspaceFileManagerOnce().catch((error) => {
-          console.error("[workbuddy-remote] file manager failed", error);
-          window.alert(error instanceof Error ? error.message : String(error));
-        });
-      });
-      document.body.appendChild(button);
-    }
-    button.textContent = t("fileManager");
-    applyFloatingActionButtonStyle(button, 87);
+  let integratedRemoteControlsObserver = null;
+  let integratedRemoteControlsSyncScheduled = false;
+
+  function removeBridgeFloatingControls() {
+    document.getElementById("wb-bridge-file-manager-button")?.remove();
+    document.getElementById("wb-bridge-restart-button")?.remove();
   }
 
-  function ensureRestartButton() {
-    let button = document.getElementById("wb-bridge-restart-button");
-    if (!restartEnabled || !restartAvailable) {
-      button?.remove();
+  function getCompactText(element) {
+    return String(element?.textContent || "").replace(/\\s+/g, " ").trim();
+  }
+
+  function setIntegratedMenuItemLabel(item, label) {
+    const textLeaves = [...item.querySelectorAll("*")]
+      .filter((element) => element.children.length === 0 && getCompactText(element));
+    const target =
+      item.querySelector(".user-menu-item-label") ||
+      item.querySelector("[class*='_label_']") ||
+      textLeaves.at(-1);
+    if (target) {
+      target.textContent = label;
+    } else {
+      item.textContent = label;
+    }
+  }
+
+  function scrubClonedMenuItemIds(item) {
+    item.removeAttribute("id");
+    for (const element of item.querySelectorAll("[id]")) {
+      element.removeAttribute("id");
+    }
+  }
+
+  function stopIntegratedMenuEvent(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+  }
+
+  function closeNativeTransientMenus() {
+    document.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      code: "Escape",
+      bubbles: true,
+      cancelable: true,
+    }));
+  }
+
+  function handleIntegratedFileManagerClick(event) {
+    stopIntegratedMenuEvent(event);
+    closeNativeTransientMenus();
+    openWorkspaceFileManagerOnce().catch((error) => {
+      console.error("[workbuddy-remote] file manager failed", error);
+      window.alert(error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  function getDirectMenuItems(container) {
+    return [...(container?.children || [])].filter((element) => element.nodeType === 1);
+  }
+
+  function findDirectMenuItem(container, pattern) {
+    return getDirectMenuItems(container).find((item) => pattern.test(getCompactText(item)));
+  }
+
+  function syncFileManagerAttachmentEntries() {
+    if (!fileManagerEnabled) {
+      for (const entry of document.querySelectorAll("[data-wb-bridge-file-manager-entry='true']")) {
+        entry.remove();
+      }
       return;
     }
-    if (!button) {
-      button = document.createElement("button");
-      button.id = "wb-bridge-restart-button";
-      button.type = "button";
-      button.addEventListener("click", () => {
-        requestBridgeRestart().catch((error) => {
-          console.error("[workbuddy-remote] restart failed", error);
-          setBridgeStatus("");
-          window.alert(error instanceof Error ? error.message : String(error));
-        });
-      });
-      document.body.appendChild(button);
+
+    for (const container of document.querySelectorAll("[role='listbox'],[class*='_popover_']")) {
+      const localFileItem = findDirectMenuItem(container, /^(?:本地文件|Local Files?|Local File)$/iu);
+      const tencentDocsItem = findDirectMenuItem(container, /^(?:腾讯文档|Tencent Docs?)$/iu);
+      if (!localFileItem || !tencentDocsItem) {
+        continue;
+      }
+
+      let entry = getDirectMenuItems(container)
+        .find((item) => item.dataset.wbBridgeFileManagerEntry === "true");
+      if (!entry) {
+        entry = localFileItem.cloneNode(true);
+        scrubClonedMenuItemIds(entry);
+        entry.dataset.wbBridgeFileManagerEntry = "true";
+        entry.setAttribute("role", localFileItem.getAttribute("role") || "button");
+        entry.tabIndex = localFileItem.tabIndex >= 0 ? localFileItem.tabIndex : 0;
+        entry.addEventListener("pointerdown", stopIntegratedMenuEvent, true);
+        entry.addEventListener("mousedown", stopIntegratedMenuEvent, true);
+        entry.addEventListener("click", handleIntegratedFileManagerClick, true);
+      }
+      setIntegratedMenuItemLabel(entry, t("fileManager"));
+      entry.style.removeProperty("display");
+      entry.style.removeProperty("visibility");
+      if (entry.nextElementSibling !== tencentDocsItem) {
+        container.insertBefore(entry, tencentDocsItem);
+      }
     }
-    button.textContent = t("restartProgram");
-    applyFloatingActionButtonStyle(
-      button,
-      20,
-      restartInProgress,
-      "rgba(110,28,28,.96)",
-      "#fff2f2"
-    );
+  }
+
+  function handleIntegratedRestartClick(event) {
+    stopIntegratedMenuEvent(event);
+    if (restartInProgress) {
+      return;
+    }
+    closeNativeTransientMenus();
+    requestBridgeRestart().catch((error) => {
+      console.error("[workbuddy-remote] restart failed", error);
+      setBridgeStatus("");
+      window.alert(error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  function syncRestartUserMenuEntry() {
+    const existingEntries = [...document.querySelectorAll("[data-wb-bridge-restart-menu-entry='true']")];
+    if (!restartEnabled || !restartAvailable) {
+      for (const entry of existingEntries) {
+        entry.remove();
+      }
+      return;
+    }
+
+    const footer = document.querySelector(".user-menu-popover .user-menu-footer");
+    const logoutItem =
+      footer?.querySelector(".user-menu-item--logout") ||
+      [...(footer?.querySelectorAll("[role='button'],.user-menu-item") || [])]
+        .find((item) => /退出登录|退出登陆|Logout|Sign out/iu.test(getCompactText(item)));
+    if (!footer || !logoutItem) {
+      return;
+    }
+
+    let entry = footer.querySelector("[data-wb-bridge-restart-menu-entry='true']");
+    if (!entry) {
+      entry = logoutItem.cloneNode(true);
+      scrubClonedMenuItemIds(entry);
+      entry.dataset.wbBridgeRestartMenuEntry = "true";
+      entry.classList.remove("user-menu-item--logout");
+      entry.setAttribute("role", logoutItem.getAttribute("role") || "button");
+      entry.tabIndex = logoutItem.tabIndex >= 0 ? logoutItem.tabIndex : 0;
+      entry.addEventListener("pointerdown", stopIntegratedMenuEvent, true);
+      entry.addEventListener("mousedown", stopIntegratedMenuEvent, true);
+      entry.addEventListener("click", handleIntegratedRestartClick, true);
+    }
+
+    setIntegratedMenuItemLabel(entry, restartInProgress ? t("restartStarting") : t("restartProgram"));
+    entry.setAttribute("aria-disabled", restartInProgress ? "true" : "false");
+    entry.style.cursor = restartInProgress ? "default" : "pointer";
+    entry.style.opacity = restartInProgress ? ".6" : "";
+    if (entry.nextElementSibling !== logoutItem) {
+      footer.insertBefore(entry, logoutItem);
+    }
+  }
+
+  function syncIntegratedRemoteControls() {
+    integratedRemoteControlsSyncScheduled = false;
+    removeBridgeFloatingControls();
+    syncFileManagerAttachmentEntries();
+    syncRestartUserMenuEntry();
+  }
+
+  function scheduleIntegratedRemoteControlsSync() {
+    if (integratedRemoteControlsSyncScheduled) {
+      return;
+    }
+    integratedRemoteControlsSyncScheduled = true;
+    queueMicrotask(syncIntegratedRemoteControls);
+  }
+
+  function installIntegratedRemoteControls() {
+    syncIntegratedRemoteControls();
+    if (integratedRemoteControlsObserver || !document.documentElement) {
+      return;
+    }
+    integratedRemoteControlsObserver = new MutationObserver(scheduleIntegratedRemoteControlsSync);
+    integratedRemoteControlsObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
   }
 
   async function initializeRemoteControls() {
-    if (!fileManagerEnabled && !restartEnabled) {
-      return;
-    }
     try {
-      const bootstrap = await fetchJson("/bridge/bootstrap");
-      restartAvailable =
-        restartEnabled && bootstrap?.restartAvailable !== false;
+      if (restartEnabled || fileManagerEnabled) {
+        const bootstrap = await fetchJson("/bridge/bootstrap");
+        restartAvailable =
+          restartEnabled && bootstrap?.restartAvailable !== false;
+      }
     } catch (error) {
       console.warn("[workbuddy-remote] failed to read bridge bootstrap", error);
     }
-    ensureFileManagerButton();
-    ensureRestartButton();
+    installIntegratedRemoteControls();
   }
 
   let sensitiveFieldMaskObserver = null;
