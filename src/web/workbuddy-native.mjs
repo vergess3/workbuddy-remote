@@ -2846,6 +2846,20 @@ function renderWorkBuddyNativeShimJs({
     }
   }
 
+  const fileManagerMenuIconSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2c.7 0 1.36.3 1.82.82L12 7.5h6.5A2.5 2.5 0 0 1 21 10v7.5A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"></path><path d="M3 10h18"></path><path d="M15.5 15.5h3"></path><path d="M17 14v3"></path></svg>';
+
+  function setFileManagerMenuItemIcon(item) {
+    const icon = item.querySelector("._icon_2lapt_1,[class*='_icon_']");
+    if (!icon) {
+      return;
+    }
+    if (icon.dataset.wbBridgeFileManagerIcon !== "true" || icon.innerHTML !== fileManagerMenuIconSvg) {
+      icon.innerHTML = fileManagerMenuIconSvg;
+      icon.dataset.wbBridgeFileManagerIcon = "true";
+    }
+  }
+
   function scrubClonedMenuItemIds(item) {
     item.removeAttribute("id");
     for (const element of item.querySelectorAll("[id]")) {
@@ -2913,6 +2927,7 @@ function renderWorkBuddyNativeShimJs({
         entry.addEventListener("click", handleIntegratedFileManagerClick, true);
       }
       setIntegratedMenuItemLabel(entry, t("fileManager"));
+      setFileManagerMenuItemIcon(entry);
       entry.style.removeProperty("display");
       entry.style.removeProperty("visibility");
       if (entry.nextElementSibling !== tencentDocsItem) {
@@ -2957,7 +2972,6 @@ function renderWorkBuddyNativeShimJs({
       entry = logoutItem.cloneNode(true);
       scrubClonedMenuItemIds(entry);
       entry.dataset.wbBridgeRestartMenuEntry = "true";
-      entry.classList.remove("user-menu-item--logout");
       entry.setAttribute("role", logoutItem.getAttribute("role") || "button");
       entry.tabIndex = logoutItem.tabIndex >= 0 ? logoutItem.tabIndex : 0;
       entry.addEventListener("pointerdown", stopIntegratedMenuEvent, true);
@@ -2965,7 +2979,14 @@ function renderWorkBuddyNativeShimJs({
       entry.addEventListener("click", handleIntegratedRestartClick, true);
     }
 
+    entry.classList.add("user-menu-item--logout");
     setIntegratedMenuItemLabel(entry, restartInProgress ? t("restartStarting") : t("restartProgram"));
+    const label = entry.querySelector(".user-menu-item-label");
+    if (label) {
+      label.style.setProperty("justify-content", "center");
+      label.style.setProperty("text-align", "center");
+      label.style.setProperty("width", "100%");
+    }
     entry.setAttribute("aria-disabled", restartInProgress ? "true" : "false");
     entry.style.cursor = restartInProgress ? "default" : "pointer";
     entry.style.opacity = restartInProgress ? ".6" : "";
