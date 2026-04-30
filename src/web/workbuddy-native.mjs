@@ -2351,9 +2351,9 @@ function renderWorkBuddyNativeShimJs({
       rect.width >= 12 &&
       rect.height >= 12 &&
       rect.top >= -8 &&
-      rect.top <= 180 &&
-      rect.bottom <= 240 &&
-      rect.height <= 140
+      rect.top <= 112 &&
+      rect.bottom <= 156 &&
+      rect.height <= 112
     );
   }
 
@@ -2375,30 +2375,15 @@ function renderWorkBuddyNativeShimJs({
   function getClickableControlAtPoint(x, y) {
     return withMobileHitTargetPassthrough(() => {
       const element = document.elementFromPoint?.(x, y);
-      return getClickableControlFromElement(element);
+      if (!element?.closest) {
+        return null;
+      }
+      const control = element.closest("button,a,[role='button'],[role='menuitem'],[tabindex]");
+      if (!control || control.closest?.("[id^='wb-bridge-']")) {
+        return null;
+      }
+      return control;
     });
-  }
-
-  function getClickableControlFromElement(element) {
-    if (!element?.closest) {
-      return null;
-    }
-    const selector = "button,a,[role='button'],[role='menuitem'],[tabindex],[aria-label],[title],[data-testid],[data-action]";
-    let current = element.closest(selector);
-    if (current?.closest?.("[id^='wb-bridge-']")) {
-      current = null;
-    }
-    for (let depth = 0, node = element; !current && node && node !== document.body && depth < 6; depth += 1, node = node.parentElement) {
-      if (node.closest?.("[id^='wb-bridge-']")) {
-        break;
-      }
-      const style = window.getComputedStyle?.(node);
-      if (typeof node.onclick === "function" || style?.cursor === "pointer") {
-        current = node;
-        break;
-      }
-    }
-    return current || null;
   }
 
   function dispatchSyntheticPointerMouseClick(control, clientX, clientY) {
@@ -2433,17 +2418,6 @@ function renderWorkBuddyNativeShimJs({
     }
     dispatch("mouseup", MouseEvent, { ...eventInit, buttons: 0 });
     dispatch("click", MouseEvent, { ...eventInit, buttons: 0, detail: 1 });
-    return true;
-  }
-
-  function queueSyntheticPointerMouseClick(control, clientX, clientY) {
-    if (!control) {
-      return false;
-    }
-    setTimeout(() => {
-      const target = control.isConnected ? control : getClickableControlAtPoint(clientX, clientY);
-      dispatchSyntheticPointerMouseClick(target, clientX, clientY);
-    }, 90);
     return true;
   }
 
@@ -2573,29 +2547,6 @@ function renderWorkBuddyNativeShimJs({
     return callWorkBuddyRemoteSidebarToggle(nextOpenState);
   }
 
-  function canUseMobileNavigationOpenApi() {
-    return Boolean(
-      typeof globalThis.__workbuddyRemoteSetSidebarOpen === "function" ||
-      typeof globalThis.__workbuddyRemoteOpenSidebar === "function" ||
-      typeof globalThis.__workbuddyRemoteToggleSidebar === "function"
-    );
-  }
-
-  function queueMobileNavigationOpenAfterNativeGesture() {
-    if (!canUseMobileNavigationOpenApi()) {
-      return false;
-    }
-    for (const delayMs of [90, 240, 560]) {
-      setTimeout(() => {
-        const nativeState = readNativeMobileSidebarState();
-        if (!nativeState || nativeState.open !== true) {
-          callWorkBuddyRemoteSidebarToggle(true);
-        }
-      }, delayMs);
-    }
-    return true;
-  }
-
   function ensureMobileNavigationStyleSheet() {
     const styleId = "wb-bridge-mobile-navigation-style";
     if (document.getElementById(styleId)) {
@@ -2704,7 +2655,7 @@ function renderWorkBuddyNativeShimJs({
       mobileNavigationAssist.gesture = null;
       return;
     }
-    if (y <= 8) {
+    if (y <= 40) {
       mobileNavigationAssist.gesture = null;
       return;
     }
@@ -2753,7 +2704,7 @@ function renderWorkBuddyNativeShimJs({
       event.preventDefault?.();
       event.stopPropagation?.();
       event.stopImmediatePropagation?.();
-      queueMobileNavigationOpenAfterNativeGesture();
+      activateMobileNavigation(true);
       return;
     }
     if (dx < 0 && gesture.canClose) {
@@ -2808,7 +2759,7 @@ function renderWorkBuddyNativeShimJs({
     const control = tap.control?.isConnected ? tap.control : getClickableControlAtPoint(point.x, point.y);
     if (isMobileNavigationTapIntent(point.x, point.y, control) && Date.now() - mobileNavigationAssist.lastActivationAt >= 250) {
       mobileNavigationAssist.gesture = null;
-      if (queueMobileNavigationOpenAfterNativeGesture()) {
+      if (activateMobileNavigation(true)) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation?.();
@@ -2820,11 +2771,11 @@ function renderWorkBuddyNativeShimJs({
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
-      queueSyntheticPointerMouseClick(control, point.x, point.y);
+      dispatchSyntheticPointerMouseClick(control, point.x, point.y);
       return;
     }
     if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
-      if (queueMobileNavigationOpenAfterNativeGesture()) {
+      if (activateMobileNavigation(true)) {
         mobileNavigationAssist.gesture = null;
         event.preventDefault();
         event.stopPropagation();
