@@ -2666,16 +2666,12 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function getMobileSidebarOpenState() {
-    const rememberedState = getRememberedMobileSidebarState();
     const nativeState = readNativeMobileSidebarState();
     if (nativeState) {
-      const recentlyRequested = rememberedState !== null && Date.now() - mobileNavigationAssist.lastActivationAt < 900;
-      if (recentlyRequested && nativeState.open !== rememberedState) {
-        return rememberedState;
-      }
       rememberMobileSidebarState(nativeState.open);
       return nativeState.open;
     }
+    const rememberedState = getRememberedMobileSidebarState();
     if (rememberedState !== null) {
       return rememberedState;
     }
@@ -2737,7 +2733,7 @@ function renderWorkBuddyNativeShimJs({
 
   function refreshMobileNavigationHitTarget() {
     mobileNavigationAssist.refreshScheduled = false;
-    if (!isMobileTouchViewport() || !document.body || getMobileSidebarOpenState()) {
+    if (!isMobileTouchViewport() || !document.body) {
       hideMobileNavigationHitTarget();
       return;
     }
@@ -2847,7 +2843,6 @@ function renderWorkBuddyNativeShimJs({
       event.stopPropagation?.();
       event.stopImmediatePropagation?.();
       activateMobileNavigation(true);
-      scheduleMobileNavigationRefresh();
       return;
     }
     if (dx < 0 && gesture.canClose) {
@@ -2856,7 +2851,6 @@ function renderWorkBuddyNativeShimJs({
       event.stopPropagation?.();
       event.stopImmediatePropagation?.();
       activateMobileNavigation(false);
-      scheduleMobileNavigationRefresh();
     }
   }
 
@@ -2903,8 +2897,7 @@ function renderWorkBuddyNativeShimJs({
     const control = tap.control?.isConnected ? tap.control : getClickableControlAtPoint(point.x, point.y);
     if (isMobileNavigationTapIntent(point.x, point.y, control) && Date.now() - mobileNavigationAssist.lastActivationAt >= 250) {
       mobileNavigationAssist.gesture = null;
-      if (activateMobileNavigation(!getMobileSidebarOpenState())) {
-        scheduleMobileNavigationRefresh();
+      if (activateMobileNavigation(true)) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation?.();
@@ -2920,9 +2913,8 @@ function renderWorkBuddyNativeShimJs({
       return;
     }
     if (isPointInMobileNavigationHitBand(point.x, point.y) && Date.now() - mobileNavigationAssist.lastActivationAt >= 750) {
-      if (activateMobileNavigation(!getMobileSidebarOpenState())) {
+      if (activateMobileNavigation(true)) {
         mobileNavigationAssist.gesture = null;
-        scheduleMobileNavigationRefresh();
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation?.();

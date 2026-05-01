@@ -442,49 +442,14 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
         showBackdrop: true,
         animationDuration: 300
       });
-      const __workbuddyRemoteRuntimeNarrowForSidebar = () => {
-        const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 0 : 0;
-        return Boolean(isNarrowForSidebar || (viewportWidth > 0 && viewportWidth <= 820));
-      };
-      const __workbuddyRemoteRuntimeNarrowForDetail = () => {
-        const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 0 : 0;
-        return Boolean(isNarrowForDetail || (viewportWidth > 0 && viewportWidth <= 980));
-      };
-      const __workbuddyRemoteTryOpenSidebarDrawer = (grid, view, config) => {
-        if (!grid || !view) return;
-        try {
-          if (grid.isDrawerOpen?.(view)) return;
-          if (typeof grid.openDrawer === "function") {
-            grid.openDrawer(view, config);
-          } else if (typeof grid.toggleDrawer === "function") {
-            grid.toggleDrawer(view, config);
-          }
-        } catch {}
-      };
-      const __workbuddyRemoteEnsureSidebarDrawerOpen = (grid, view, config) => {
-        __workbuddyRemoteTryOpenSidebarDrawer(grid, view, config);
-        try { requestAnimationFrame(() => __workbuddyRemoteTryOpenSidebarDrawer(grid, view, config)); } catch {}
-        try { setTimeout(() => __workbuddyRemoteTryOpenSidebarDrawer(grid, view, config), 80); } catch {}
-      };
-      const __workbuddyRemoteTryCloseSidebarDrawer = (grid, view) => {
-        if (!grid || !view) return;
-        try {
-          if (grid.isDrawerOpen?.(view) && typeof grid.closeDrawer === "function") grid.closeDrawer(view);
-        } catch {}
-      };
-      const __workbuddyRemoteEnsureSidebarDrawerClosed = (grid, view) => {
-        __workbuddyRemoteTryCloseSidebarDrawer(grid, view);
-        try { requestAnimationFrame(() => __workbuddyRemoteTryCloseSidebarDrawer(grid, view)); } catch {}
-        try { setTimeout(() => __workbuddyRemoteTryCloseSidebarDrawer(grid, view), 80); } catch {}
-      };
       globalThis.__workbuddyRemoteSetSidebarOpen = (open) => {
         const nextOpen = Boolean(open);
         const grid = gridRef.current;
         const view = sidebarGridViewRef.current;
         if (!grid || !view) return false;
-        globalThis.__workbuddyRemoteSidebarDesiredOpen = { open: nextOpen, at: Date.now() };
-        const runtimeNarrowForSidebar = __workbuddyRemoteRuntimeNarrowForSidebar();
-        const runtimeNarrowForDetail = __workbuddyRemoteRuntimeNarrowForDetail();
+        const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 0 : 0;
+        const runtimeNarrowForSidebar = Boolean(isNarrowForSidebar || (viewportWidth > 0 && viewportWidth <= 820));
+        const runtimeNarrowForDetail = Boolean(isNarrowForDetail || (viewportWidth > 0 && viewportWidth <= 980));
         if (isLocalMode) {
           __workbuddyRemoteAnimateSidebar();
           if (nextOpen) {
@@ -502,15 +467,18 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
         }
         if (runtimeNarrowForSidebar) {
           if (nextOpen) {
-            const sidebarDrawerConfig = __workbuddyRemoteDrawerConfig();
             if (runtimeNarrowForDetail && detailPanelViewRef.current) {
               try {
                 if (grid.isDrawerOpen?.(detailPanelViewRef.current)) grid.closeDrawer(detailPanelViewRef.current);
               } catch {}
             }
-            __workbuddyRemoteEnsureSidebarDrawerOpen(grid, view, sidebarDrawerConfig);
-          } else {
-            __workbuddyRemoteEnsureSidebarDrawerClosed(grid, view);
+            if (typeof grid.openDrawer === "function") {
+              grid.openDrawer(view, __workbuddyRemoteDrawerConfig());
+            } else if (typeof grid.toggleDrawer === "function" && !grid.isDrawerOpen?.(view)) {
+              grid.toggleDrawer(view, __workbuddyRemoteDrawerConfig());
+            }
+          } else if (typeof grid.closeDrawer === "function") {
+            try { grid.closeDrawer(view); } catch {}
           }
           return true;
         }
@@ -528,13 +496,10 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
       globalThis.__workbuddyRemoteGetSidebarState = () => {
         let drawerOpen = false;
         try { drawerOpen = Boolean(gridRef.current?.isDrawerOpen?.(sidebarGridViewRef.current)); } catch {}
-        const runtimeNarrowForSidebar = __workbuddyRemoteRuntimeNarrowForSidebar();
-        const desired = globalThis.__workbuddyRemoteSidebarDesiredOpen;
-        const desiredFresh = desired && Date.now() - desired.at < 900;
         return {
-          open: isLocalMode ? !workbuddyHidden : runtimeNarrowForSidebar ? (desiredFresh ? Boolean(desired.open) : drawerOpen) : sidebarExpanded,
+          open: isLocalMode ? !workbuddyHidden : isNarrowForSidebar ? drawerOpen : sidebarExpanded,
           collapsed: isLocalMode ? workbuddyHidden : !sidebarExpanded,
-          narrow: runtimeNarrowForSidebar,
+          narrow: isNarrowForSidebar,
           local: isLocalMode
         };
       };
