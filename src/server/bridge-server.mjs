@@ -79,9 +79,9 @@ const LOOPBACK_ORIGIN_PATTERN =
 const ESCAPED_LOOPBACK_ORIGIN_PATTERN =
   /\bhttps?:\\\/\\\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
 const ROOT_RELATIVE_PROXY_PATH_PATTERN =
-  /\b((?:src|href|action|data-[\w-]+)\s*=\s*["'])\/(?!\/)|(\burl\(\s*["']?)\/(?!\/)|(["'`])\/(?!\/)(?=(?:static|api|cgi|doc|sheet|slide|form|desktop|openapi|cgi-bin|oauth|tools|tdoc|socket\.io)\b)/giu;
+  /\b((?:src|href|action|data-[\w-]+)\s*=\s*["'])\/(?!\/|bridge\/loopback\/)(?=(?:static|doc|sheet|slide|form|desktop|tools|tdoc)\b)|(\burl\(\s*["']?)\/(?!\/)|(["'`])\/(?!\/)(?=(?:static|doc|sheet|slide|form|desktop|tools|tdoc)\b)/giu;
 const ESCAPED_ROOT_RELATIVE_PROXY_PATH_PATTERN =
-  /(["'`])\\\/(?!\\\/)(?=(?:static|api|cgi|doc|sheet|slide|form|desktop|openapi|cgi-bin|oauth|tools|tdoc|socket\.io)\b)/giu;
+  /(["'`])\\\/(?!\\\/)(?=(?:static|doc|sheet|slide|form|desktop|tools|tdoc)\b)/giu;
 
 function readPositiveIntegerEnv(names, fallback) {
   const candidates = Array.isArray(names) ? names : [names];
@@ -493,7 +493,12 @@ function shouldRewriteProxyBody(headers) {
     return false;
   }
 
-  return TEXT_PROXY_CONTENT_TYPE_PATTERN.test(getHeaderValue(headers, "content-type"));
+  const contentType = getHeaderValue(headers, "content-type");
+  if (/^text\/event-stream\b/iu.test(contentType)) {
+    return false;
+  }
+
+  return TEXT_PROXY_CONTENT_TYPE_PATTERN.test(contentType);
 }
 
 async function collectProxyBody(stream) {
@@ -523,6 +528,10 @@ function proxyLoopbackRequest(req, res, targetUrl) {
   return new Promise((resolve, reject) => {
     const proxyReq = client.request(targetUrl, requestOptions, async (proxyRes) => {
       try {
+        if (/^text\/event-stream\b/iu.test(getHeaderValue(proxyRes.headers, "content-type"))) {
+          proxyReq.setTimeout(0);
+        }
+
         const rewritingBody = shouldRewriteProxyBody(proxyRes.headers);
         if (!rewritingBody) {
           res.writeHead(
