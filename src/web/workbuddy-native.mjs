@@ -581,6 +581,76 @@ function renderWorkBuddyNativeShimJs({
     return Boolean(input && !isLocalPathLike(input) && !/^[a-z][a-z0-9+.-]*:/iu.test(input));
   }
 
+  function loopbackUrlOriginForBridge(url) {
+    if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+      return "";
+    }
+
+    const hostname = String(url.hostname || "").toLowerCase().replace(/^\\[|\\]$/g, "");
+    if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "::1") {
+      return "";
+    }
+
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    return window.location.origin + "/bridge/loopback/" + url.protocol.replace(/:$/u, "") + "/" + port;
+  }
+
+  function rewriteLoopbackHttpUrlForBridge(value) {
+    const input = String(value || "").trim();
+    if (!input) {
+      return "";
+    }
+
+    try {
+      const url = new URL(input);
+      const bridgeOrigin = loopbackUrlOriginForBridge(url);
+      return bridgeOrigin ? bridgeOrigin + url.pathname + url.search + url.hash : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function rewriteLoopbackUrlStringForBridge(value) {
+    const direct = rewriteLoopbackHttpUrlForBridge(value);
+    if (direct) {
+      return direct;
+    }
+
+    return String(value || "").replace(/\\bhttps?:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::\\d{1,5})?/giu, (match) => {
+      try {
+        const url = new URL(match);
+        return loopbackUrlOriginForBridge(url) || match;
+      } catch {
+        return match;
+      }
+    });
+  }
+
+  function rewriteLoopbackUrlsInValue(value, depth = 0) {
+    if (depth > 8) {
+      return value;
+    }
+    if (typeof value === "string") {
+      return rewriteLoopbackUrlStringForBridge(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => rewriteLoopbackUrlsInValue(item, depth + 1));
+    }
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    const result = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      result[key] = rewriteLoopbackUrlsInValue(nestedValue, depth + 1);
+    }
+    return result;
+  }
+
+  function shouldRewriteLoopbackBuddyApiResult(method) {
+    return method === "getDocumentPreviewUrl" || method === "tdocGetPreviewUrl";
+  }
+
   function joinWindowsPath(parent, child) {
     const cleanParent = String(parent || "").replace(/[\\\\/]+$/g, "");
     const cleanChild = String(child || "").replace(/^[\\\\/]+/g, "");
@@ -3878,11 +3948,14 @@ function renderWorkBuddyNativeShimJs({
   }
 
   async function forwardBuddyApiCall(method, args) {
-    return request({
+    const result = await request({
       type: "buddy-api-call",
       method,
       args: await encodeValue(args),
     });
+    return shouldRewriteLoopbackBuddyApiResult(method)
+      ? rewriteLoopbackUrlsInValue(result)
+      : result;
   }
 
   async function callBuddyApi(method, args) {

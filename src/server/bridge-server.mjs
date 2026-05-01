@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
@@ -59,6 +60,24 @@ const MODEL_SECRET_WRITE_METHODS = new Set([
 ]);
 const REDACTED_MODEL_API_KEY = "workbuddy-remote-redacted-api-key";
 const REDACTED_MODEL_ENDPOINT = "https://workbuddy-remote.local/redacted/chat/completions";
+const LOOPBACK_PROXY_PREFIX = "/bridge/loopback/";
+const LOOPBACK_PROXY_MAX_REWRITE_BYTES = 32 * 1024 * 1024;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+const TEXT_PROXY_CONTENT_TYPE_PATTERN =
+  /^(?:text\/|application\/(?:javascript|json|xml|xhtml\+xml)|image\/svg\+xml)\b/iu;
+const LOOPBACK_ORIGIN_PATTERN =
+  /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
+const ESCAPED_LOOPBACK_ORIGIN_PATTERN =
+  /\bhttps?:\\\/\\\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
 
 function readPositiveIntegerEnv(names, fallback) {
   const candidates = Array.isArray(names) ? names : [names];
@@ -265,6 +284,210 @@ function writeFeatureDisabled(res, featureName) {
   json(res, 403, {
     ok: false,
     error: `${featureName} is disabled by config.`,
+  });
+}
+
+function defaultPortForProtocol(protocol) {
+  return protocol === "https:" || protocol === "https" ? "443" : "80";
+}
+
+function isLoopbackProxyHostname(hostname) {
+  const value = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
+function isAllowedLoopbackProxyUrl(url) {
+  return (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    isLoopbackProxyHostname(url.hostname)
+  );
+}
+
+function loopbackProxyOriginPathForUrl(value) {
+  const url = value instanceof URL ? value : new URL(String(value));
+  if (!isAllowedLoopbackProxyUrl(url)) {
+    return "";
+  }
+
+  const protocol = url.protocol.replace(/:$/u, "");
+  const port = url.port || defaultPortForProtocol(url.protocol);
+  return `${LOOPBACK_PROXY_PREFIX}${protocol}/${port}`;
+}
+
+function rewriteLoopbackUrlOrigins(value) {
+  if (typeof value !== "string" || !value) {
+    return value;
+  }
+
+  return value
+    .replace(LOOPBACK_ORIGIN_PATTERN, (match) => {
+      try {
+        return loopbackProxyOriginPathForUrl(match) || match;
+      } catch {
+        return match;
+      }
+    })
+    .replace(ESCAPED_LOOPBACK_ORIGIN_PATTERN, (match) => {
+      try {
+        const rewritten = loopbackProxyOriginPathForUrl(match.replace(/\\\//gu, "/"));
+        return rewritten ? rewritten.replace(/\//gu, "\\/") : match;
+      } catch {
+        return match;
+      }
+    });
+}
+
+function parseLoopbackProxyTarget(requestUrl) {
+  if (!requestUrl.pathname.startsWith(LOOPBACK_PROXY_PREFIX)) {
+    return null;
+  }
+
+  const rest = requestUrl.pathname.slice(LOOPBACK_PROXY_PREFIX.length);
+  const slashIndex = rest.indexOf("/");
+  if (slashIndex <= 0) {
+    return null;
+  }
+
+  const protocol = rest.slice(0, slashIndex);
+  const portAndPath = rest.slice(slashIndex + 1);
+  const nextSlashIndex = portAndPath.indexOf("/");
+  const portText = nextSlashIndex >= 0 ? portAndPath.slice(0, nextSlashIndex) : portAndPath;
+  const targetPath = nextSlashIndex >= 0 ? portAndPath.slice(nextSlashIndex) : "/";
+  if (protocol !== "http" && protocol !== "https") {
+    return null;
+  }
+
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+
+  return new URL(`${protocol}://127.0.0.1:${port}${targetPath || "/"}${requestUrl.search}`);
+}
+
+function sanitizeProxyRequestHeaders(headers) {
+  const result = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    const lowerName = name.toLowerCase();
+    if (
+      HOP_BY_HOP_HEADERS.has(lowerName) ||
+      lowerName === "host" ||
+      lowerName === "cookie" ||
+      lowerName === "authorization"
+    ) {
+      continue;
+    }
+
+    result[name] = lowerName === "accept-encoding" ? "identity" : value;
+  }
+
+  result["accept-encoding"] = "identity";
+  return result;
+}
+
+function rewriteProxyHeaderValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => rewriteProxyHeaderValue(entry));
+  }
+
+  return typeof value === "string" ? rewriteLoopbackUrlOrigins(value) : value;
+}
+
+function sanitizeProxyResponseHeaders(headers, { rewritingBody = false } = {}) {
+  const result = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    const lowerName = name.toLowerCase();
+    if (
+      HOP_BY_HOP_HEADERS.has(lowerName) ||
+      (rewritingBody && (lowerName === "content-length" || lowerName === "content-encoding"))
+    ) {
+      continue;
+    }
+
+    result[name] = lowerName === "location" ? rewriteProxyHeaderValue(value) : value;
+  }
+
+  result["Cache-Control"] = "no-store";
+  return result;
+}
+
+function getHeaderValue(headers, name) {
+  const value = headers?.[name.toLowerCase()];
+  return Array.isArray(value) ? value.join(", ") : String(value || "");
+}
+
+function shouldRewriteProxyBody(headers) {
+  const contentEncoding = getHeaderValue(headers, "content-encoding");
+  if (contentEncoding && contentEncoding.toLowerCase() !== "identity") {
+    return false;
+  }
+
+  return TEXT_PROXY_CONTENT_TYPE_PATTERN.test(getHeaderValue(headers, "content-type"));
+}
+
+async function collectProxyBody(stream) {
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    chunks.push(buffer);
+  }
+
+  return {
+    body: Buffer.concat(chunks, totalBytes),
+    canRewrite: totalBytes <= LOOPBACK_PROXY_MAX_REWRITE_BYTES,
+  };
+}
+
+function proxyLoopbackRequest(req, res, targetUrl) {
+  const client = targetUrl.protocol === "https:" ? https : http;
+  const requestOptions = {
+    method: req.method,
+    headers: sanitizeProxyRequestHeaders(req.headers),
+    ...(targetUrl.protocol === "https:" ? { rejectUnauthorized: false } : {}),
+  };
+
+  return new Promise((resolve, reject) => {
+    const proxyReq = client.request(targetUrl, requestOptions, async (proxyRes) => {
+      try {
+        const rewritingBody = shouldRewriteProxyBody(proxyRes.headers);
+        if (!rewritingBody) {
+          res.writeHead(
+            proxyRes.statusCode || 502,
+            sanitizeProxyResponseHeaders(proxyRes.headers)
+          );
+          proxyRes.pipe(res);
+          proxyRes.on("end", resolve);
+          proxyRes.on("error", reject);
+          res.on("error", reject);
+          return;
+        }
+
+        const { body, canRewrite } = await collectProxyBody(proxyRes);
+        const responseHeaders = sanitizeProxyResponseHeaders(proxyRes.headers, {
+          rewritingBody: true,
+        });
+        const responseBody = canRewrite
+          ? Buffer.from(rewriteLoopbackUrlOrigins(body.toString("utf8")), "utf8")
+          : body;
+        res.writeHead(proxyRes.statusCode || 502, {
+          ...responseHeaders,
+          "Content-Length": responseBody.byteLength,
+        });
+        res.end(responseBody);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    proxyReq.setTimeout(30000, () => {
+      proxyReq.destroy(new Error(`Loopback proxy timed out: ${targetUrl.href}`));
+    });
+    proxyReq.on("error", reject);
+    req.on("error", reject);
+    req.pipe(proxyReq);
   });
 }
 
@@ -619,6 +842,17 @@ function createRequestHandler(runtime, auth) {
           ok: ready,
           hostConnected: ready,
         });
+        return;
+      }
+
+      if (requestUrl.pathname.startsWith(LOOPBACK_PROXY_PREFIX)) {
+        const targetUrl = parseLoopbackProxyTarget(requestUrl);
+        if (!targetUrl) {
+          json(res, 400, { ok: false, error: "Invalid loopback proxy URL." });
+          return;
+        }
+
+        await proxyLoopbackRequest(req, res, targetUrl);
         return;
       }
 
