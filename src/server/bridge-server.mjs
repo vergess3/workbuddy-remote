@@ -507,6 +507,30 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
     if (patched.includes(sidebarToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleSidebar")) {
       patched = patched.replace(sidebarToggleExposeFrom, sidebarToggleExposeTo);
     }
+    const detailToggleExposeFrom = "\treturn {\n\t\tgridRef,";
+    const detailToggleExposeTo = `\tconst __workbuddyRemoteToggleDetailPanel = () => {
+      const grid = gridRef.current;
+      const view = detailPanelViewRef.current;
+      if (!grid || !view) return false;
+      try {
+        if (isNarrowForDetail) {
+          setShowDetailPanel(grid.toggleDrawer(view, detailDrawerConfig));
+        } else {
+          setShowDetailPanel(grid.toggleViewVisible(view));
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      globalThis.__workbuddyRemoteToggleDetailPanel = __workbuddyRemoteToggleDetailPanel;
+    } catch {}
+\treturn {
+\t\tgridRef,`;
+    if (patched.includes(detailToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleDetailPanel")) {
+      patched = patched.replace(detailToggleExposeFrom, detailToggleExposeTo);
+    }
   }
 
   sendVersionedScript(req, res, patched, {
