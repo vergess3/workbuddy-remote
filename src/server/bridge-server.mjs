@@ -78,6 +78,10 @@ const LOOPBACK_ORIGIN_PATTERN =
   /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
 const ESCAPED_LOOPBACK_ORIGIN_PATTERN =
   /\bhttps?:\\\/\\\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
+const ROOT_RELATIVE_PROXY_PATH_PATTERN =
+  /\b((?:src|href|action|data-[\w-]+)\s*=\s*["'])\/(?!\/)|(\burl\(\s*["']?)\/(?!\/)|(["'`])\/(?!\/)(?=(?:static|api|cgi|doc|sheet|slide|form|desktop|openapi|cgi-bin|oauth|tools|tdoc|socket\.io)\b)/giu;
+const ESCAPED_ROOT_RELATIVE_PROXY_PATH_PATTERN =
+  /(["'`])\\\/(?!\\\/)(?=(?:static|api|cgi|doc|sheet|slide|form|desktop|openapi|cgi-bin|oauth|tools|tdoc|socket\.io)\b)/giu;
 
 function readPositiveIntegerEnv(names, fallback) {
   const candidates = Array.isArray(names) ? names : [names];
@@ -337,6 +341,29 @@ function rewriteLoopbackUrlOrigins(value) {
     });
 }
 
+function escapedProxyOriginPath(proxyOriginPath) {
+  return String(proxyOriginPath || "").replace(/\//gu, "\\/");
+}
+
+function rewriteRootRelativeProxyPaths(value, proxyOriginPath) {
+  if (typeof value !== "string" || !value || !proxyOriginPath) {
+    return value;
+  }
+
+  return value
+    .replace(ROOT_RELATIVE_PROXY_PATH_PATTERN, (match, attrPrefix, cssPrefix, quotePrefix) => {
+      const prefix = attrPrefix || cssPrefix || quotePrefix || "";
+      return `${prefix}${proxyOriginPath}/`;
+    })
+    .replace(ESCAPED_ROOT_RELATIVE_PROXY_PATH_PATTERN, (match, quotePrefix) => {
+      return `${quotePrefix}${escapedProxyOriginPath(proxyOriginPath)}\\/`;
+    });
+}
+
+function rewriteProxyBodyUrls(value, proxyOriginPath) {
+  return rewriteRootRelativeProxyPaths(rewriteLoopbackUrlOrigins(value), proxyOriginPath);
+}
+
 function parseLoopbackProxyTarget(requestUrl) {
   if (!requestUrl.pathname.startsWith(LOOPBACK_PROXY_PREFIX)) {
     return null;
@@ -365,6 +392,47 @@ function parseLoopbackProxyTarget(requestUrl) {
   return new URL(`${protocol}://127.0.0.1:${port}${targetPath || "/"}${requestUrl.search}`);
 }
 
+function parseLoopbackProxyTargetFromReferer(requestUrl, referer) {
+  if (requestUrl.pathname.startsWith(LOOPBACK_PROXY_PREFIX)) {
+    return null;
+  }
+
+  const rawReferer = typeof referer === "string" ? referer : "";
+  if (!rawReferer) {
+    return null;
+  }
+
+  let refererUrl;
+  try {
+    refererUrl = new URL(rawReferer);
+  } catch {
+    return null;
+  }
+
+  const rest = refererUrl.pathname.startsWith(LOOPBACK_PROXY_PREFIX)
+    ? refererUrl.pathname.slice(LOOPBACK_PROXY_PREFIX.length)
+    : "";
+  const firstSlashIndex = rest.indexOf("/");
+  if (firstSlashIndex <= 0) {
+    return null;
+  }
+
+  const protocol = rest.slice(0, firstSlashIndex);
+  const remainder = rest.slice(firstSlashIndex + 1);
+  const nextSlashIndex = remainder.indexOf("/");
+  const portText = nextSlashIndex >= 0 ? remainder.slice(0, nextSlashIndex) : remainder;
+  if (protocol !== "http" && protocol !== "https") {
+    return null;
+  }
+
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+
+  return new URL(`${protocol}://127.0.0.1:${port}${requestUrl.pathname}${requestUrl.search}`);
+}
+
 function sanitizeProxyRequestHeaders(headers) {
   const result = {};
   for (const [name, value] of Object.entries(headers || {})) {
@@ -385,15 +453,18 @@ function sanitizeProxyRequestHeaders(headers) {
   return result;
 }
 
-function rewriteProxyHeaderValue(value) {
+function rewriteLocationHeaderValue(value, proxyOriginPath) {
   if (Array.isArray(value)) {
-    return value.map((entry) => rewriteProxyHeaderValue(entry));
+    return value.map((entry) => rewriteLocationHeaderValue(entry, proxyOriginPath));
+  }
+  if (typeof value !== "string") {
+    return value;
   }
 
-  return typeof value === "string" ? rewriteLoopbackUrlOrigins(value) : value;
+  return rewriteRootRelativeProxyPaths(rewriteLoopbackUrlOrigins(value), proxyOriginPath);
 }
 
-function sanitizeProxyResponseHeaders(headers, { rewritingBody = false } = {}) {
+function sanitizeProxyResponseHeaders(headers, { rewritingBody = false, proxyOriginPath = "" } = {}) {
   const result = {};
   for (const [name, value] of Object.entries(headers || {})) {
     const lowerName = name.toLowerCase();
@@ -404,7 +475,7 @@ function sanitizeProxyResponseHeaders(headers, { rewritingBody = false } = {}) {
       continue;
     }
 
-    result[name] = lowerName === "location" ? rewriteProxyHeaderValue(value) : value;
+    result[name] = lowerName === "location" ? rewriteLocationHeaderValue(value, proxyOriginPath) : value;
   }
 
   result["Cache-Control"] = "no-store";
@@ -442,6 +513,7 @@ async function collectProxyBody(stream) {
 
 function proxyLoopbackRequest(req, res, targetUrl) {
   const client = targetUrl.protocol === "https:" ? https : http;
+  const proxyOriginPath = loopbackProxyOriginPathForUrl(targetUrl);
   const requestOptions = {
     method: req.method,
     headers: sanitizeProxyRequestHeaders(req.headers),
@@ -455,7 +527,7 @@ function proxyLoopbackRequest(req, res, targetUrl) {
         if (!rewritingBody) {
           res.writeHead(
             proxyRes.statusCode || 502,
-            sanitizeProxyResponseHeaders(proxyRes.headers)
+            sanitizeProxyResponseHeaders(proxyRes.headers, { proxyOriginPath })
           );
           proxyRes.pipe(res);
           proxyRes.on("end", resolve);
@@ -467,9 +539,10 @@ function proxyLoopbackRequest(req, res, targetUrl) {
         const { body, canRewrite } = await collectProxyBody(proxyRes);
         const responseHeaders = sanitizeProxyResponseHeaders(proxyRes.headers, {
           rewritingBody: true,
+          proxyOriginPath,
         });
         const responseBody = canRewrite
-          ? Buffer.from(rewriteLoopbackUrlOrigins(body.toString("utf8")), "utf8")
+          ? Buffer.from(rewriteProxyBodyUrls(body.toString("utf8"), proxyOriginPath), "utf8")
           : body;
         res.writeHead(proxyRes.statusCode || 502, {
           ...responseHeaders,
@@ -853,6 +926,15 @@ function createRequestHandler(runtime, auth) {
         }
 
         await proxyLoopbackRequest(req, res, targetUrl);
+        return;
+      }
+
+      const refererLoopbackTarget = parseLoopbackProxyTargetFromReferer(
+        requestUrl,
+        req.headers.referer
+      );
+      if (refererLoopbackTarget) {
+        await proxyLoopbackRequest(req, res, refererLoopbackTarget);
         return;
       }
 
