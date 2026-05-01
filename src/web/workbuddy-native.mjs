@@ -2315,10 +2315,6 @@ function renderWorkBuddyNativeShimJs({
     lastActivationAt: 0,
     gesture: null,
     topBarTap: null,
-    menuHitTarget: null,
-    menuObserver: null,
-    menuRefreshScheduled: false,
-    menuLastActivationAt: 0,
     detailHitTarget: null,
     detailObserver: null,
     detailRefreshScheduled: false,
@@ -2436,139 +2432,6 @@ function renderWorkBuddyNativeShimJs({
     }
     hitTarget.style.setProperty("display", "none", "important");
     hitTarget.style.setProperty("pointer-events", "none", "important");
-  }
-
-  function hideMobileTopBarMenuHitTarget() {
-    const hitTarget = mobileNavigationAssist.menuHitTarget;
-    if (!hitTarget?.style) {
-      return;
-    }
-    hitTarget.style.setProperty("display", "none", "important");
-    hitTarget.style.setProperty("pointer-events", "none", "important");
-  }
-
-  function isDedicatedMobileTopBarHitTarget(target) {
-    return Boolean(target?.closest?.(
-      "#wb-bridge-mobile-topbar-menu-hit-target,#wb-bridge-mobile-detail-hit-target"
-    ));
-  }
-
-  function findMobileTopBarMenuControl() {
-    const selectors = [
-      ".teams-top-bar .top-bar-left button",
-      ".workbuddy-topbar .workbuddy-topbar-left button",
-    ];
-    let fallback = null;
-    for (const button of document.querySelectorAll(selectors.join(","))) {
-      if (button.closest?.("[id^='wb-bridge-']")) {
-        continue;
-      }
-      const rect = button.getBoundingClientRect?.();
-      if (!rect || rect.width <= 0 || rect.height <= 0 || rect.top > 96 || rect.left > 140) {
-        continue;
-      }
-      fallback ||= button;
-      const label = getControlLabel(button).toLowerCase();
-      const text = String(button.textContent || "");
-      const className = String(button.className || "").toLowerCase();
-      if (
-        /(toggle.*sidebar|sidebar|menu|history|session|conversation|task|nav|drawer|菜单|侧栏|历史|会话|对话|任务|展开|折叠)/u.test(label + " " + className) ||
-        /[☰≡]/u.test(text)
-      ) {
-        return button;
-      }
-    }
-    return fallback;
-  }
-
-  function ensureMobileTopBarMenuHitTarget() {
-    let hitTarget = mobileNavigationAssist.menuHitTarget;
-    if (hitTarget?.isConnected) {
-      applyMobileNavigationTouchHandling(hitTarget);
-      return hitTarget;
-    }
-    hitTarget = document.createElement("button");
-    hitTarget.id = "wb-bridge-mobile-topbar-menu-hit-target";
-    hitTarget.type = "button";
-    hitTarget.tabIndex = -1;
-    hitTarget.setAttribute("aria-label", "Open navigation");
-    hitTarget.style.cssText = "position:fixed;z-index:2147483647;left:0;top:0;width:44px;height:44px;min-width:44px!important;min-height:44px!important;box-sizing:border-box;border:0;margin:0;padding:0;background:transparent;color:transparent;opacity:.01;display:none;pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;border-radius:0;";
-    applyMobileNavigationTouchHandling(hitTarget);
-    hitTarget.addEventListener("touchend", activateMobileTopBarMenuFromHitTarget, { passive: false });
-    hitTarget.addEventListener("click", activateMobileTopBarMenuFromHitTarget, true);
-    document.body.appendChild(hitTarget);
-    mobileNavigationAssist.menuHitTarget = hitTarget;
-    return hitTarget;
-  }
-
-  function refreshMobileTopBarMenuHitTarget() {
-    mobileNavigationAssist.menuRefreshScheduled = false;
-    if (!isMobileTouchViewport() || !document.body || getMobileSidebarOpenState()) {
-      hideMobileTopBarMenuHitTarget();
-      return;
-    }
-    const control = findMobileTopBarMenuControl();
-    if (!control) {
-      hideMobileTopBarMenuHitTarget();
-      return;
-    }
-    ensureMobileNavigationStyleSheet();
-    const hitTarget = ensureMobileTopBarMenuHitTarget();
-    const rect = control.getBoundingClientRect();
-    const width = Math.max(44, Math.ceil(rect.width));
-    const height = Math.max(44, Math.ceil(rect.height));
-    const left = Math.max(0, Math.round(rect.left - Math.max(0, (width - rect.width) / 2)));
-    const top = Math.max(0, Math.round(rect.top - Math.max(0, (height - rect.height) / 2)));
-    const nextStyle = {
-      left: left + "px",
-      top: top + "px",
-      width: width + "px",
-      height: height + "px",
-      minWidth: width + "px",
-      minHeight: height + "px",
-      maxWidth: width + "px",
-      maxHeight: height + "px",
-      display: "block",
-      pointerEvents: "auto",
-    };
-    for (const [name, value] of Object.entries(nextStyle)) {
-      if (hitTarget.style[name] !== value) {
-        hitTarget.style.setProperty(name.replace(/[A-Z]/g, (letter) => "-" + letter.toLowerCase()), value, "important");
-      }
-    }
-  }
-
-  function scheduleMobileTopBarMenuHitTargetRefresh() {
-    if (mobileNavigationAssist.menuRefreshScheduled) {
-      return;
-    }
-    mobileNavigationAssist.menuRefreshScheduled = true;
-    requestAnimationFrame(refreshMobileTopBarMenuHitTarget);
-  }
-
-  function activateMobileTopBarMenuFromHitTarget(event) {
-    if (!isMobileTouchViewport()) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-
-    const now = Date.now();
-    if (now - mobileNavigationAssist.menuLastActivationAt < 650) {
-      return;
-    }
-    mobileNavigationAssist.menuLastActivationAt = now;
-    if (activateMobileNavigation(true)) {
-      scheduleMobileTopBarMenuHitTargetRefresh();
-      return;
-    }
-    const control = findMobileTopBarMenuControl();
-    if (control) {
-      const rect = control.getBoundingClientRect();
-      dispatchSyntheticPointerMouseClick(control, rect.left + rect.width / 2, rect.top + rect.height / 2);
-    }
-    scheduleMobileTopBarMenuHitTargetRefresh();
   }
 
   function hideMobileDetailHitTarget() {
@@ -2903,7 +2766,6 @@ function renderWorkBuddyNativeShimJs({
     mobileNavigationAssist.refreshScheduled = true;
     requestAnimationFrame(() => {
       refreshMobileNavigationHitTarget();
-      scheduleMobileTopBarMenuHitTargetRefresh();
       scheduleMobileDetailHitTargetRefresh();
     });
   }
@@ -3002,10 +2864,6 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function startTopBarTapRescue(event) {
-    if (isDedicatedMobileTopBarHitTarget(event.target)) {
-      mobileNavigationAssist.topBarTap = null;
-      return;
-    }
     if (!isMobileTouchViewport() || event.touches.length !== 1) {
       mobileNavigationAssist.topBarTap = null;
       return;
@@ -3110,20 +2968,9 @@ function renderWorkBuddyNativeShimJs({
     }, { capture: true, passive: false });
     document.addEventListener("touchend", endMobileNavigationGesture, { capture: true, passive: false });
     document.addEventListener("touchcancel", endMobileNavigationGesture, { capture: true, passive: false });
-    document.addEventListener("click", scheduleMobileTopBarMenuHitTargetRefresh, true);
 
     window.addEventListener("resize", scheduleMobileNavigationRefresh, { passive: true });
     window.addEventListener("orientationchange", scheduleMobileNavigationRefresh, { passive: true });
-    if (!mobileNavigationAssist.menuObserver) {
-      mobileNavigationAssist.menuObserver = new MutationObserver(scheduleMobileTopBarMenuHitTargetRefresh);
-      mobileNavigationAssist.menuObserver.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "title", "style", "aria-label"],
-      });
-    }
-    scheduleMobileTopBarMenuHitTargetRefresh();
     if (!mobileNavigationAssist.detailObserver) {
       mobileNavigationAssist.detailObserver = new MutationObserver(scheduleMobileDetailHitTargetRefresh);
       mobileNavigationAssist.detailObserver.observe(document.documentElement, {
