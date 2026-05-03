@@ -616,11 +616,7 @@ function renderWorkBuddyNativeShimJs({
 
   function rewriteLoopbackUrlStringForBridge(value) {
     const direct = rewriteLoopbackHttpUrlForBridge(value);
-    if (direct) {
-      return direct;
-    }
-
-    return String(value || "")
+    const input = direct || String(value || "")
       .replace(/\\bhttps?:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::\\d{1,5})?/giu, (match) => {
         try {
           const url = new URL(match);
@@ -628,7 +624,9 @@ function renderWorkBuddyNativeShimJs({
         } catch {
           return match;
         }
-      })
+      });
+
+    return input
       .replace(/\\bhttps?%3A%2F%2F(?:localhost|127(?:\\.|%2E)0(?:\\.|%2E)0(?:\\.|%2E)1|%5B%3A%3A1%5D)(?:%3A\\d{1,5})?/giu, (match) => {
         try {
           const url = new URL(decodeURIComponent(match));
