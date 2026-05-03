@@ -7,6 +7,7 @@ const FALLBACK_BUDDY_API_METHODS = [
   "cancel",
   "respondToPermission",
   "getSession",
+  "workbuddyRemoteGetSessionMessagesPage",
   "onSessionUpserted",
   "onSessionDeleted",
   "onSessionEvent",
@@ -46,7 +47,7 @@ function renderWorkBuddyNativeHtml(sourceHtml) {
   }
   html = html.replace(
     /\b(src|href)=(["']\.\/assets\/(?:index|setting)-[\w-]+\.js)(["'])/gu,
-    '$1=$2?wb-remote-patch=8$3'
+    '$1=$2?wb-remote-patch=10$3'
   );
   return html;
 }
@@ -71,7 +72,10 @@ function renderWorkBuddyNativeShimJs({
   const listeners = new Map();
   const incomingChunkedMessages = new Map();
   let outgoingChunkSeq = 0;
-  const wsChunkChars = 1024 * 1024;
+  const wsChunkChars = 4 * 1024 * 1024;
+  const remoteHistoryPageMessages = 120;
+  const inFlightBuddyApiCalls = new Map();
+  let lastRemoteHistoryLoadAt = 0;
   let socket = null;
   let readyPromise = null;
   let requestId = 0;
@@ -616,14 +620,24 @@ function renderWorkBuddyNativeShimJs({
       return direct;
     }
 
-    return String(value || "").replace(/\\bhttps?:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::\\d{1,5})?/giu, (match) => {
-      try {
-        const url = new URL(match);
-        return loopbackUrlOriginForBridge(url) || match;
-      } catch {
-        return match;
-      }
-    });
+    return String(value || "")
+      .replace(/\\bhttps?:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::\\d{1,5})?/giu, (match) => {
+        try {
+          const url = new URL(match);
+          return loopbackUrlOriginForBridge(url) || match;
+        } catch {
+          return match;
+        }
+      })
+      .replace(/\\bhttps?%3A%2F%2F(?:localhost|127(?:\\.|%2E)0(?:\\.|%2E)0(?:\\.|%2E)1|%5B%3A%3A1%5D)(?:%3A\\d{1,5})?/giu, (match) => {
+        try {
+          const url = new URL(decodeURIComponent(match));
+          const bridgeOrigin = loopbackUrlOriginForBridge(url);
+          return bridgeOrigin ? encodeURIComponent(bridgeOrigin) : match;
+        } catch {
+          return match;
+        }
+      });
   }
 
   function rewriteLoopbackUrlsInValue(value, depth = 0) {
@@ -648,7 +662,11 @@ function renderWorkBuddyNativeShimJs({
   }
 
   function shouldRewriteLoopbackBuddyApiResult(method) {
-    return method === "getDocumentPreviewUrl" || method === "tdocGetPreviewUrl";
+    return (
+      method === "getDocumentPreviewUrl" ||
+      method === "tdocGetPreviewUrl" ||
+      method === "getSessionArtifacts"
+    );
   }
 
   function joinWindowsPath(parent, child) {
@@ -3189,7 +3207,11 @@ function renderWorkBuddyNativeShimJs({
         });
         return null;
       }
-      return nativeWindowOpen(url, target, features);
+      return nativeWindowOpen(
+        typeof url === "string" ? rewriteLoopbackUrlStringForBridge(url) : url,
+        target,
+        features
+      );
     };
   }
 
@@ -3799,7 +3821,7 @@ function renderWorkBuddyNativeShimJs({
         });
         return;
       }
-      window.open(message.url, "_blank", "noopener,noreferrer");
+      window.open(rewriteLoopbackUrlStringForBridge(message.url), "_blank", "noopener,noreferrer");
     }
   }
 
@@ -3947,15 +3969,63 @@ function renderWorkBuddyNativeShimJs({
     });
   }
 
+  function createInFlightBuddyApiKey(method, args) {
+    if (method !== "getSession" && method !== "loadSession") {
+      return "";
+    }
+    try {
+      return method + ":" + JSON.stringify(args || []);
+    } catch {
+      return method;
+    }
+  }
+
   async function forwardBuddyApiCall(method, args) {
-    const result = await request({
-      type: "buddy-api-call",
-      method,
-      args: await encodeValue(args),
-    });
-    return shouldRewriteLoopbackBuddyApiResult(method)
-      ? rewriteLoopbackUrlsInValue(result)
-      : result;
+    const inFlightKey = createInFlightBuddyApiKey(method, args);
+    if (inFlightKey && inFlightBuddyApiCalls.has(inFlightKey)) {
+      return inFlightBuddyApiCalls.get(inFlightKey);
+    }
+
+    const promise = (async () => {
+      if (method === "workbuddyRemoteGetSessionMessagesPage") {
+        return request({
+          type: "workbuddy-remote-session-messages-page",
+          sessionId: args?.[0] || "",
+          before: args?.[1]?.before,
+          limit: args?.[1]?.limit || remoteHistoryPageMessages,
+        });
+      }
+
+      if (method === "loadSession") {
+        await request({
+          type: "buddy-api-call-discard-result",
+          method,
+          args: await encodeValue(args),
+        });
+        return true;
+      }
+
+      const result = await request({
+        type: method === "getSession" ? "buddy-api-call-session-page" : "buddy-api-call",
+        method,
+        args: await encodeValue(args),
+        limit: method === "getSession" ? remoteHistoryPageMessages : undefined,
+      });
+      return shouldRewriteLoopbackBuddyApiResult(method)
+        ? rewriteLoopbackUrlsInValue(result)
+        : result;
+    })();
+
+    if (!inFlightKey) {
+      return promise;
+    }
+
+    inFlightBuddyApiCalls.set(inFlightKey, promise);
+    try {
+      return await promise;
+    } finally {
+      inFlightBuddyApiCalls.delete(inFlightKey);
+    }
   }
 
   async function callBuddyApi(method, args) {
@@ -3997,7 +4067,8 @@ function renderWorkBuddyNativeShimJs({
           await openWorkspaceFileManagerOnce({ targetPath: url });
           return true;
         }
-        window.open(url, "_blank", "noopener,noreferrer");
+        window.open(rewriteLoopbackUrlStringForBridge(url), "_blank", "noopener,noreferrer");
+        return true;
       }
     }
     if (method === "openPath") {
@@ -4113,6 +4184,39 @@ function renderWorkBuddyNativeShimJs({
     };
   }
 
+  function installRemoteHistoryPagerScrollWatcher() {
+    if (globalThis.__workbuddyRemoteHistoryPagerScrollWatcherInstalled) {
+      return;
+    }
+    globalThis.__workbuddyRemoteHistoryPagerScrollWatcherInstalled = true;
+    document.addEventListener("scroll", (event) => {
+      const target = event.target;
+      if (!target || target === document || target === document.body || target === document.documentElement) {
+        return;
+      }
+      const scrollTop = Number(target.scrollTop);
+      if (!Number.isFinite(scrollTop) || scrollTop > 96) {
+        return;
+      }
+      const isChatScroller =
+        target?.dataset?.virtuosoScroller === "true" ||
+        String(target?.className || "").includes("chat") ||
+        Boolean(target?.closest?.(".chat-container,[data-message-request-id]"));
+      if (!isChatScroller) {
+        return;
+      }
+      const loadOlder = globalThis.__workbuddyRemoteLoadOlderHistory;
+      const now = Date.now();
+      if (typeof loadOlder !== "function" || now - lastRemoteHistoryLoadAt < 1200) {
+        return;
+      }
+      lastRemoteHistoryLoadAt = now;
+      Promise.resolve(loadOlder()).catch((error) => {
+        console.warn("[workbuddy-remote] failed to load older history page", error);
+      });
+    }, true);
+  }
+
   const buddyApiTarget = {};
   for (const method of apiMethods) {
     buddyApiTarget[method] = (...args) => {
@@ -4147,6 +4251,7 @@ function renderWorkBuddyNativeShimJs({
   });
 
   globalThis.buddyAPI = buddyApi;
+  installRemoteHistoryPagerScrollWatcher();
   globalThis.__WORKBUDDY_VERSION__ = workBuddyVersion;
   globalThis.__electronLog = globalThis.__electronLog || {
     debug: console.debug.bind(console),

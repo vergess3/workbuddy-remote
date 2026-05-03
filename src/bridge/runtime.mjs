@@ -28,16 +28,36 @@ const CDP_INLINE_JSON_CHARS = readPositiveIntegerEnv(
 );
 const CDP_CHUNK_CHARS = readPositiveIntegerEnv(
   ["WORKBUDDY_REMOTE_CDP_CHUNK_CHARS"],
-  1024 * 1024
+  4 * 1024 * 1024
 );
 const BROWSER_SOCKET_CHUNK_CHARS = readPositiveIntegerEnv(
   ["WORKBUDDY_REMOTE_BROWSER_WS_CHUNK_CHARS", "WORKBUDDY_REMOTE_WS_CHUNK_CHARS"],
-  1024 * 1024
+  4 * 1024 * 1024
+);
+const SESSION_HISTORY_PAGE_MESSAGES = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_SESSION_HISTORY_PAGE_MESSAGES"],
+  120
+);
+const SESSION_EVENT_HISTORY_PAGE_ITEMS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_SESSION_EVENT_HISTORY_PAGE_ITEMS"],
+  200
+);
+const SESSION_EVENT_HISTORY_PAGE_CHARS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_SESSION_EVENT_HISTORY_PAGE_CHARS"],
+  512 * 1024
+);
+const SESSION_EVENT_HISTORY_ITEM_CHARS = readPositiveIntegerEnv(
+  ["WORKBUDDY_REMOTE_SESSION_EVENT_HISTORY_ITEM_CHARS"],
+  128 * 1024
 );
 const BUDDY_API_TIMEOUT_MS_BY_METHOD = new Map([
   ["createSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
   ["loadSession", WORKBUDDY_RPC_CREATE_LOAD_TIMEOUT_MS],
   ["prompt", WORKBUDDY_RPC_PROMPT_TIMEOUT_MS],
+]);
+const BUDDY_API_DEDUP_METHODS = new Set([
+  "getSession",
+  "loadSession",
 ]);
 const BUDDY_API_TIMEOUT_RETRY_SAFE_METHODS = new Set([
   "authGetAccountUsage",
@@ -106,6 +126,18 @@ function createTransferId(prefix) {
   return `${prefix}-${process.pid}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`;
+}
+
+function createBuddyApiInFlightKey(mode, method, args) {
+  if (!BUDDY_API_DEDUP_METHODS.has(String(method || ""))) {
+    return "";
+  }
+
+  try {
+    return `${mode}:${method}:${JSON.stringify(args || [])}`;
+  } catch {
+    return `${mode}:${method}`;
+  }
 }
 
 function resolvePowerShellExePath() {
@@ -459,7 +491,7 @@ class CdpClient {
           });
         }
 
-        const bridgeVersion = 2;
+        const bridgeVersion = 4;
         if (
           globalThis.__workbuddyBridge?.__workbuddyRemoteNativeOnly &&
           globalThis.__workbuddyBridge.__workbuddyRemoteVersion >= bridgeVersion
@@ -546,8 +578,13 @@ class CdpClient {
         const buddyApiListeners = new Map();
         const storedArgs = new Map();
         const storedResults = new Map();
+        const storedSessionHistories = new Map();
         let storedResultSeq = 0;
         const inlineJsonMaxChars = ${CDP_INLINE_JSON_CHARS};
+        const sessionHistoryPageMessages = ${SESSION_HISTORY_PAGE_MESSAGES};
+        const sessionEventHistoryPageItems = ${SESSION_EVENT_HISTORY_PAGE_ITEMS};
+        const sessionEventHistoryPageChars = ${SESSION_EVENT_HISTORY_PAGE_CHARS};
+        const sessionEventHistoryItemChars = ${SESSION_EVENT_HISTORY_ITEM_CHARS};
         const maxStoreAgeMs = 5 * 60 * 1000;
 
         const cleanupStores = () => {
@@ -562,6 +599,144 @@ class CdpClient {
               storedResults.delete(id);
             }
           }
+          for (const [id, entry] of storedSessionHistories.entries()) {
+            if ((entry.createdAt || 0) < expiresBefore) {
+              storedSessionHistories.delete(id);
+            }
+          }
+        };
+
+        const normalizePositiveInteger = (value, fallback) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+        };
+
+        const readSessionIdFromArgs = (args) => {
+          const first = Array.isArray(args) ? args[0] : "";
+          if (typeof first === "string" && first.trim()) {
+            return first.trim();
+          }
+          if (first && typeof first === "object") {
+            for (const key of ["sessionId", "id"]) {
+              if (typeof first[key] === "string" && first[key].trim()) {
+                return first[key].trim();
+              }
+            }
+          }
+          return "";
+        };
+
+        const isReplayableRemoteEventHistoryPayload = (payload) => {
+          if (!payload || typeof payload !== "object") {
+            return false;
+          }
+          if ((typeof payload.type === "string" ? payload.type : null) === "questionRequest") {
+            return true;
+          }
+          const updateType = typeof payload.update?.sessionUpdate === "string"
+            ? payload.update.sessionUpdate
+            : null;
+          if (!updateType) {
+            return false;
+          }
+          return ![
+            "available_commands_update",
+            "current_mode_update",
+            "config_option_update",
+            "session_info_update",
+            "state_update",
+            "session_end",
+          ].includes(updateType);
+        };
+
+        const selectRemoteEventHistory = (eventHistory) => {
+          if (!Array.isArray(eventHistory) || sessionEventHistoryPageItems <= 0 || sessionEventHistoryPageChars <= 0) {
+            return [];
+          }
+
+          const selected = [];
+          let totalChars = 2;
+          for (let index = eventHistory.length - 1; index >= 0; index -= 1) {
+            if (selected.length >= sessionEventHistoryPageItems) {
+              break;
+            }
+            const payload = eventHistory[index];
+            if (!isReplayableRemoteEventHistoryPayload(payload)) {
+              continue;
+            }
+            let raw = "";
+            try {
+              raw = JSON.stringify(payload);
+            } catch {
+              continue;
+            }
+            if (!raw || raw.length > sessionEventHistoryItemChars) {
+              continue;
+            }
+            if (totalChars + raw.length > sessionEventHistoryPageChars) {
+              break;
+            }
+            totalChars += raw.length + 1;
+            selected.push(payload);
+          }
+          selected.reverse();
+          return selected;
+        };
+
+        const withPagedSessionHistory = (sessionId, session, options = {}) => {
+          if (!session || typeof session !== "object" || Array.isArray(session)) {
+            return session;
+          }
+
+          const messages = Array.isArray(session.messages) ? session.messages : null;
+          if (!messages) {
+            return session;
+          }
+
+          const limit = Math.max(1, Math.min(
+            normalizePositiveInteger(options.limit, sessionHistoryPageMessages),
+            1000
+          ));
+          const total = messages.length;
+          const offset = Math.max(0, total - limit);
+          const effectiveSessionId = sessionId || session.sessionId || session.id || "";
+          const selectedEventHistory = selectRemoteEventHistory(session.eventHistory);
+          const eventHistoryTotal = Array.isArray(session.eventHistory) ? session.eventHistory.length : 0;
+          storedSessionHistories.set(effectiveSessionId, {
+            messages,
+            createdAt: Date.now(),
+          });
+
+          if (total <= limit) {
+            return {
+              ...session,
+              eventHistory: selectedEventHistory,
+              __workbuddyRemoteHistoryPage: {
+                sessionId: effectiveSessionId,
+                total,
+                offset: 0,
+                limit,
+                hasMore: false,
+                eventHistoryTotal,
+                eventHistoryReturned: selectedEventHistory.length,
+              },
+            };
+          }
+
+          return {
+            ...session,
+            messages: messages.slice(offset),
+            eventHistory: selectedEventHistory,
+            __workbuddyRemoteHistoryPage: {
+              sessionId: effectiveSessionId,
+              total,
+              offset,
+              limit,
+              hasMore: offset > 0,
+              eventHistoryTotal,
+              eventHistoryReturned: selectedEventHistory.length,
+            },
+          };
         };
 
         const makeChunkedResult = (payload) => {
@@ -646,6 +821,60 @@ class CdpClient {
               throw new Error("WorkBuddy buddyAPI method is unavailable: " + method);
             }
             return encode(await fn(...decode(args || [])));
+          },
+
+          async callBuddyApiNoResult(method, args) {
+            const fn = globalThis.buddyAPI?.[method];
+            if (typeof fn !== "function") {
+              throw new Error("WorkBuddy buddyAPI method is unavailable: " + method);
+            }
+            await fn(...decode(args || []));
+            return makeChunkedResult(encode(true));
+          },
+
+          async callBuddyApiSessionPage(method, args, options) {
+            const fn = globalThis.buddyAPI?.[method];
+            if (typeof fn !== "function") {
+              throw new Error("WorkBuddy buddyAPI method is unavailable: " + method);
+            }
+            const decodedArgs = decode(args || []);
+            const result = await fn(...decodedArgs);
+            if (method !== "getSession") {
+              return makeChunkedResult(encode(result));
+            }
+            return makeChunkedResult(encode(withPagedSessionHistory(
+              readSessionIdFromArgs(decodedArgs),
+              result,
+              options || {}
+            )));
+          },
+
+          getStoredSessionMessagesPage(sessionId, before, limit) {
+            cleanupStores();
+            const id = String(sessionId || "");
+            const entry = storedSessionHistories.get(id);
+            const messages = Array.isArray(entry?.messages) ? entry.messages : [];
+            if (entry) {
+              entry.createdAt = Date.now();
+            }
+            const total = messages.length;
+            const pageLimit = Math.max(1, Math.min(
+              normalizePositiveInteger(limit, sessionHistoryPageMessages),
+              1000
+            ));
+            const end = Math.max(0, Math.min(
+              total,
+              Number.isFinite(Number(before)) ? Math.trunc(Number(before)) : total
+            ));
+            const offset = Math.max(0, end - pageLimit);
+            return makeChunkedResult(encode({
+              sessionId: id,
+              total,
+              offset,
+              limit: pageLimit,
+              hasMore: offset > 0,
+              messages: messages.slice(offset, end),
+            }));
           },
 
           async callBuddyApiChunked(method, args) {
@@ -824,6 +1053,7 @@ class BridgeRuntime {
     this.buddyApiSubscriptionRefCounts = new Map();
     this.warmupPromise = null;
     this.hideWindowAfterStartAttempted = false;
+    this.inFlightBuddyApiCalls = new Map();
   }
 
   async initialize() {
@@ -1262,7 +1492,7 @@ class BridgeRuntime {
     }
   }
 
-  async readBuddyApiResultEnvelope(envelope, timeoutMs) {
+  async readBuddyApiResultEnvelope(envelope, timeoutMs, context = {}) {
     if (!envelope || typeof envelope !== "object") {
       return envelope;
     }
@@ -1291,6 +1521,7 @@ class BridgeRuntime {
       }
 
       logger.info("buddy_api.result.chunked", "Read chunked WorkBuddy buddyAPI result", {
+        ...context,
         id,
         totalLength,
         chunks: Math.ceil(totalLength / CDP_CHUNK_CHARS),
@@ -1323,13 +1554,35 @@ class BridgeRuntime {
       }
 
       const envelope = await this.cdp.evaluate(expression, { timeoutMs });
-      return this.readBuddyApiResultEnvelope(envelope, timeoutMs);
+      return this.readBuddyApiResultEnvelope(envelope, timeoutMs, { method });
     } finally {
       await this.releaseStoredBuddyApiArgs(storedArgsId, timeoutMs);
     }
   }
 
   async invokeBuddyApi(method, args) {
+    const inFlightKey = createBuddyApiInFlightKey("normal", method, args);
+    if (inFlightKey && this.inFlightBuddyApiCalls.has(inFlightKey)) {
+      logger.info("buddy_api.invoke.deduped", "Reusing in-flight WorkBuddy buddyAPI call", {
+        method,
+      });
+      return this.inFlightBuddyApiCalls.get(inFlightKey);
+    }
+
+    const promise = this.invokeBuddyApiUncached(method, args);
+    if (!inFlightKey) {
+      return promise;
+    }
+
+    this.inFlightBuddyApiCalls.set(inFlightKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlightBuddyApiCalls.delete(inFlightKey);
+    }
+  }
+
+  async invokeBuddyApiUncached(method, args) {
     logger.debug("buddy_api.invoke", "Invoking WorkBuddy buddyAPI method", {
       method,
       args: summarizeBuddyApiPayload(method, args),
@@ -1368,6 +1621,147 @@ class BridgeRuntime {
       });
       throw error;
     }
+  }
+
+  async invokeBuddyApiDiscardResult(method, args) {
+    const inFlightKey = createBuddyApiInFlightKey("discard", method, args);
+    if (inFlightKey && this.inFlightBuddyApiCalls.has(inFlightKey)) {
+      logger.info("buddy_api.invoke_discard.deduped", "Reusing in-flight discard-result WorkBuddy buddyAPI call", {
+        method,
+      });
+      return this.inFlightBuddyApiCalls.get(inFlightKey);
+    }
+
+    const promise = this.invokeBuddyApiDiscardResultUncached(method, args);
+    if (!inFlightKey) {
+      return promise;
+    }
+
+    this.inFlightBuddyApiCalls.set(inFlightKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlightBuddyApiCalls.delete(inFlightKey);
+    }
+  }
+
+  async invokeBuddyApiDiscardResultUncached(method, args) {
+    logger.debug("buddy_api.invoke_discard", "Invoking WorkBuddy buddyAPI method without returning payload", {
+      method,
+      args: summarizeBuddyApiPayload(method, args),
+    });
+    try {
+      const timeoutMs = getBuddyApiTimeoutMs(method);
+      const retrySafe = isBuddyApiTimeoutRetrySafe(method);
+      const rawArgs = JSON.stringify(args || []);
+      const result = await this.withCdpRecovery(async () => {
+        const envelope = await this.cdp.evaluate(
+          `globalThis.__workbuddyBridge.callBuddyApiNoResult(${JSON.stringify(method)}, ${rawArgs})`,
+          { timeoutMs }
+        );
+        return unwrapTransportPayload(await this.readBuddyApiResultEnvelope(envelope, timeoutMs, {
+          method,
+          mode: "discard",
+        }));
+      }, {
+        recover: retrySafe,
+        recoverTimeouts: retrySafe,
+      });
+      return result;
+    } catch (error) {
+      logger.error("buddy_api.invoke_discard.error", "WorkBuddy buddyAPI discard-result invoke failed", {
+        method,
+        args: summarizeBuddyApiPayload(method, args),
+        error,
+      });
+      throw error;
+    }
+  }
+
+  async invokeBuddyApiSessionPage(method, args, options = {}) {
+    const inFlightKey = createBuddyApiInFlightKey("session-page", method, args);
+    if (inFlightKey && this.inFlightBuddyApiCalls.has(inFlightKey)) {
+      logger.info("buddy_api.invoke_session_page.deduped", "Reusing in-flight paged WorkBuddy buddyAPI call", {
+        method,
+      });
+      return this.inFlightBuddyApiCalls.get(inFlightKey);
+    }
+
+    const promise = this.invokeBuddyApiSessionPageUncached(method, args, options);
+    if (!inFlightKey) {
+      return promise;
+    }
+
+    this.inFlightBuddyApiCalls.set(inFlightKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlightBuddyApiCalls.delete(inFlightKey);
+    }
+  }
+
+  async invokeBuddyApiSessionPageUncached(method, args, options = {}) {
+    logger.debug("buddy_api.invoke_session_page", "Invoking paged WorkBuddy buddyAPI method", {
+      method,
+      args: summarizeBuddyApiPayload(method, args),
+      options: summarizeValue(options),
+    });
+    try {
+      const timeoutMs = getBuddyApiTimeoutMs(method);
+      const retrySafe = isBuddyApiTimeoutRetrySafe(method);
+      const rawArgs = JSON.stringify(args || []);
+      const rawOptions = JSON.stringify(options || {});
+      const result = await this.withCdpRecovery(async () => {
+        const envelope = await this.cdp.evaluate(
+          `globalThis.__workbuddyBridge.callBuddyApiSessionPage(${JSON.stringify(method)}, ${rawArgs}, ${rawOptions})`,
+          { timeoutMs }
+        );
+        return unwrapTransportPayload(await this.readBuddyApiResultEnvelope(envelope, timeoutMs, {
+          method,
+          mode: "session-page",
+        }));
+      }, {
+        recover: retrySafe,
+        recoverTimeouts: retrySafe,
+      });
+      if (method === "getSession") {
+        const pageInfo = result?.__workbuddyRemoteHistoryPage;
+        logger.info("buddy_api.session_page.result", "Returned paged WorkBuddy session payload", {
+          method,
+          messageTotal: pageInfo?.total,
+          messageOffset: pageInfo?.offset,
+          messageLimit: pageInfo?.limit,
+          eventHistoryTotal: pageInfo?.eventHistoryTotal,
+          eventHistoryReturned: pageInfo?.eventHistoryReturned,
+        });
+      }
+      return result;
+    } catch (error) {
+      logger.error("buddy_api.invoke_session_page.error", "Paged WorkBuddy buddyAPI invoke failed", {
+        method,
+        args: summarizeBuddyApiPayload(method, args),
+        options: summarizeValue(options),
+        error,
+      });
+      throw error;
+    }
+  }
+
+  async getStoredSessionMessagesPage(sessionId, { before = 0, limit = SESSION_HISTORY_PAGE_MESSAGES } = {}) {
+    await this.ensureCdpReady();
+    const timeoutMs = WORKBUDDY_RPC_DEFAULT_TIMEOUT_MS;
+    const envelope = await this.withCdpRecovery(() =>
+      this.cdp.evaluate(
+        `globalThis.__workbuddyBridge.getStoredSessionMessagesPage(${JSON.stringify(
+          String(sessionId || "")
+        )}, ${JSON.stringify(before)}, ${JSON.stringify(limit)})`,
+        { timeoutMs }
+      )
+    );
+    return unwrapTransportPayload(await this.readBuddyApiResultEnvelope(envelope, timeoutMs, {
+      method: "workbuddyRemoteGetSessionMessagesPage",
+      mode: "session-page",
+    }));
   }
 
   async restoreBuddyApiSubscriptions() {

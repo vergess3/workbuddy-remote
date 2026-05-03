@@ -78,6 +78,8 @@ const LOOPBACK_ORIGIN_PATTERN =
   /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
 const ESCAPED_LOOPBACK_ORIGIN_PATTERN =
   /\bhttps?:\\\/\\\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?/giu;
+const ENCODED_LOOPBACK_ORIGIN_PATTERN =
+  /\bhttps?%3A%2F%2F(?:localhost|127(?:\.|%2E)0(?:\.|%2E)0(?:\.|%2E)1|%5B%3A%3A1%5D)(?:%3A\d{1,5})?/giu;
 const ROOT_RELATIVE_PROXY_PATH_PATTERN =
   /\b((?:src|href|action|data-[\w-]+)\s*=\s*["'])\/(?!\/|bridge\/loopback\/)(?=(?:static|doc|sheet|slide|form|desktop|tools|tdoc)\b)|(\burl\(\s*["']?)\/(?!\/)|(["'`])\/(?!\/)(?=(?:static|doc|sheet|slide|form|desktop|tools|tdoc)\b)/giu;
 const ESCAPED_ROOT_RELATIVE_PROXY_PATH_PATTERN =
@@ -335,6 +337,14 @@ function rewriteLoopbackUrlOrigins(value) {
       try {
         const rewritten = loopbackProxyOriginPathForUrl(match.replace(/\\\//gu, "/"));
         return rewritten ? rewritten.replace(/\//gu, "\\/") : match;
+      } catch {
+        return match;
+      }
+    })
+    .replace(ENCODED_LOOPBACK_ORIGIN_PATTERN, (match) => {
+      try {
+        const rewritten = loopbackProxyOriginPathForUrl(decodeURIComponent(match));
+        return rewritten ? encodeURIComponent(rewritten) : match;
       } catch {
         return match;
       }
@@ -693,6 +703,164 @@ async function sendAsarAsset(req, res, archive, relativePath, cacheControl) {
   await pipeline(stream, createCompressor(encoding), res);
 }
 
+function patchMainIndexLongSessionLoading(source) {
+  let patched = source;
+
+  const loadSessionTimeoutFrom =
+    'const loadSessionWithTimeout = async (sessionId, targetCwd) => withTimeout(() => adapter.loadSession(sessionId, targetCwd, []), 15e3, `loadSession timeout for ${sessionId}`);';
+  const loadSessionTimeoutTo =
+    'const loadSessionWithTimeout = async (sessionId, targetCwd) => withTimeout(() => adapter.loadSession(sessionId, targetCwd, []), 95e3, `loadSession timeout for ${sessionId}`);';
+  if (patched.includes(loadSessionTimeoutFrom)) {
+    patched = patched.replace(loadSessionTimeoutFrom, loadSessionTimeoutTo);
+  }
+
+  const skipRedundantPreloadGetSessionFrom =
+    "const preLoadSession = await api.getSession(sessionId);";
+  const skipRedundantPreloadGetSessionTo =
+    "const preLoadSession = effectiveCwd ? void 0 : await api.getSession(sessionId);";
+  if (patched.includes(skipRedundantPreloadGetSessionFrom)) {
+    patched = patched.replace(skipRedundantPreloadGetSessionFrom, skipRedundantPreloadGetSessionTo);
+  }
+
+  const addOrUpdateMessageFrom =
+    'const addOrUpdateMessage = (0, import_react.useCallback)((conversationId, message) => {';
+  const addOrUpdateMessageTo = `const sortConversationMessagesForRemoteHistory = (messages) => {
+    if (!Array.isArray(messages) || messages.length <= 1) return messages;
+    const readOrder = (message) => {
+      const directOffset = message?._offset;
+      const metaOffset = message?._meta?.["codebuddy.ai"]?.offset ?? message?.extra?.offset;
+      const offset = Number(directOffset ?? metaOffset);
+      if (Number.isFinite(offset)) return { kind: 0, value: offset };
+      const created = Number(message?.createTime ?? message?.timestamp ?? 0);
+      return Number.isFinite(created) && created > 0 ? { kind: 1, value: created } : { kind: 2, value: 0 };
+    };
+    if (!messages.some((message) => readOrder(message).kind !== 2)) return messages;
+    return [...messages].sort((left, right) => {
+      const leftOrder = readOrder(left);
+      const rightOrder = readOrder(right);
+      return leftOrder.kind - rightOrder.kind || leftOrder.value - rightOrder.value;
+    });
+  };
+  const addOrUpdateMessage = (0, import_react.useCallback)((conversationId, message) => {`;
+  if (patched.includes(addOrUpdateMessageFrom) && !patched.includes("sortConversationMessagesForRemoteHistory")) {
+    patched = patched.replace(addOrUpdateMessageFrom, addOrUpdateMessageTo);
+  }
+  if (patched.includes("sortConversationMessagesForRemoteHistory")) {
+    patched = patched.replaceAll(
+      "else updatedMessages = [...conv.messages, message];",
+      "else updatedMessages = sortConversationMessagesForRemoteHistory([...conv.messages, message]);"
+    );
+    patched = patched.replaceAll(
+      "updatedMessages = [...prev.messages, message];",
+      "updatedMessages = sortConversationMessagesForRemoteHistory([...prev.messages, message]);"
+    );
+    patched = patched.replace(
+      "return { ...conv, messages: updatedMessages, lastMessage, timestamp: shouldPreserveConversationTimestamp ? conv.timestamp : /* @__PURE__ */ new Date() };",
+      "return { ...conv, messages: updatedMessages, lastMessage: shouldPreserveConversationTimestamp ? conv.lastMessage : lastMessage, timestamp: shouldPreserveConversationTimestamp ? conv.timestamp : /* @__PURE__ */ new Date() };"
+    );
+  }
+
+  const syncHistorySkipFrom =
+    'syncSessionMessageSnapshot(sessionId, message) { if (!this.workbuddyApi) return; if (message.id.startsWith(`${sessionId}-response-`)) return;';
+  const syncHistorySkipTo =
+    'syncSessionMessageSnapshot(sessionId, message) { if (!this.workbuddyApi) return; if (message?.extra?.ownerHistoryMode === "history" || message?.extra?.workbuddyRemoteHistoryPage === true) return; if (message.id.startsWith(`${sessionId}-response-`)) return;';
+  if (patched.includes(syncHistorySkipFrom)) {
+    patched = patched.replace(syncHistorySkipFrom, syncHistorySkipTo);
+  }
+  const syncHistorySkipFormattedFrom =
+    'syncSessionMessageSnapshot(sessionId, message) {\n\t\tif (!this.workbuddyApi) return;\n\t\tif (message.id.startsWith(`${sessionId}-response-`)) return;';
+  const syncHistorySkipFormattedTo =
+    'syncSessionMessageSnapshot(sessionId, message) {\n\t\tif (!this.workbuddyApi) return;\n\t\tif (message?.extra?.ownerHistoryMode === "history" || message?.extra?.workbuddyRemoteHistoryPage === true) return;\n\t\tif (message.id.startsWith(`${sessionId}-response-`)) return;';
+  if (patched.includes(syncHistorySkipFormattedFrom)) {
+    patched = patched.replace(syncHistorySkipFormattedFrom, syncHistorySkipFormattedTo);
+  }
+
+  const markHistoryFrom =
+    'const nextMessage = fromWorkbuddySessionMessageSnapshot(snapshot); if (nextMessage.id.startsWith(`${sessionId}-response-`)) continue;';
+  const markHistoryTo =
+    'const nextMessage = fromWorkbuddySessionMessageSnapshot(snapshot); nextMessage.extra = { ...nextMessage.extra, ownerHistoryMode: "history", workbuddyRemoteHistoryPage: options?.workbuddyRemoteHistoryPage === true }; if (nextMessage.id.startsWith(`${sessionId}-response-`)) continue;';
+  if (patched.includes(markHistoryFrom)) {
+    patched = patched.replace(markHistoryFrom, markHistoryTo);
+  }
+  const markHistoryFormattedFrom =
+    'const nextMessage = fromWorkbuddySessionMessageSnapshot(snapshot);\n\t\t\tif (nextMessage.id.startsWith(`${sessionId}-response-`)) continue;';
+  const markHistoryFormattedTo =
+    'const nextMessage = fromWorkbuddySessionMessageSnapshot(snapshot);\n\t\t\tnextMessage.extra = { ...nextMessage.extra, ownerHistoryMode: "history", workbuddyRemoteHistoryPage: options?.workbuddyRemoteHistoryPage === true };\n\t\t\tif (nextMessage.id.startsWith(`${sessionId}-response-`)) continue;';
+  if (patched.includes(markHistoryFormattedFrom)) {
+    patched = patched.replace(markHistoryFormattedFrom, markHistoryFormattedTo);
+  }
+
+  const registerPagerFrom =
+    "this.reportHistoryLoadTiming(sessionId, monitorT1, msgCount); hydrationFinished = true;";
+  const registerPagerTo =
+    "this.reportHistoryLoadTiming(sessionId, monitorT1, msgCount); this.registerWorkbuddyRemoteHistoryPager(sessionId, loadedSessionSnapshot?.__workbuddyRemoteHistoryPage, ownerStatusAfterLoad); hydrationFinished = true;";
+  if (patched.includes(registerPagerFrom) && !patched.includes("registerWorkbuddyRemoteHistoryPager(sessionId")) {
+    patched = patched.replace(registerPagerFrom, registerPagerTo);
+  }
+  const registerPagerFormattedFrom =
+    "this.reportHistoryLoadTiming(sessionId, monitorT1, msgCount);\n\t\t\t\thydrationFinished = true;";
+  const registerPagerFormattedTo =
+    "this.reportHistoryLoadTiming(sessionId, monitorT1, msgCount);\n\t\t\t\tthis.registerWorkbuddyRemoteHistoryPager(sessionId, loadedSessionSnapshot?.__workbuddyRemoteHistoryPage, ownerStatusAfterLoad);\n\t\t\t\thydrationFinished = true;";
+  if (patched.includes(registerPagerFormattedFrom) && !patched.includes("registerWorkbuddyRemoteHistoryPager(sessionId")) {
+    patched = patched.replace(registerPagerFormattedFrom, registerPagerFormattedTo);
+  }
+
+  const pagerMethodsFrom =
+    "refreshExistingMessageFromRicherSnapshot(sessionId, existingMessage, snapshotMessage, ownerStatus) {";
+  const pagerMethodsTo = `registerWorkbuddyRemoteHistoryPager(sessionId, pageInfo, ownerStatus) {
+    this.__workbuddyRemoteHistoryPaging = this.__workbuddyRemoteHistoryPaging || new Map();
+    if (!pageInfo?.hasMore || !this.workbuddyApi?.workbuddyRemoteGetSessionMessagesPage) {
+      this.__workbuddyRemoteHistoryPaging.delete(sessionId);
+      return;
+    }
+    this.__workbuddyRemoteHistoryPaging.set(sessionId, {
+      before: Math.max(0, Number(pageInfo.offset) || 0),
+      limit: Math.max(1, Number(pageInfo.limit) || 120),
+      ownerStatus,
+      loading: false,
+      done: false
+    });
+    try {
+      globalThis.__workbuddyRemoteLoadOlderHistory = (targetSessionId) => this.loadWorkbuddyRemoteOlderHistory(targetSessionId || this.currentActiveSessionId);
+    } catch {}
+  }
+  async loadWorkbuddyRemoteOlderHistory(sessionId) {
+    const state = this.__workbuddyRemoteHistoryPaging?.get(sessionId);
+    if (!state || state.loading || state.done || state.before <= 0 || sessionId !== this.currentActiveSessionId) return false;
+    state.loading = true;
+    try {
+      const page = await this.workbuddyApi.workbuddyRemoteGetSessionMessagesPage(sessionId, {
+        before: state.before,
+        limit: state.limit
+      });
+      const messages = Array.isArray(page?.messages) ? page.messages : [];
+      if (messages.length === 0) {
+        state.done = true;
+        return false;
+      }
+      this.rehydrateOwnerMessages(sessionId, messages, {
+        overwriteExisting: false,
+        ownerStatus: state.ownerStatus,
+        workbuddyRemoteHistoryPage: true
+      });
+      state.before = Math.max(0, Number(page?.offset) || 0);
+      state.done = !page?.hasMore || state.before <= 0;
+      return true;
+    } catch (error) {
+      console.warn("[WorkbuddyAdapter] load older remote history page failed:", error);
+      return false;
+    } finally {
+      state.loading = false;
+    }
+  }
+  ${pagerMethodsFrom}`;
+  if (patched.includes(pagerMethodsFrom) && !patched.includes("loadWorkbuddyRemoteOlderHistory(sessionId)")) {
+    patched = patched.replace(pagerMethodsFrom, pagerMethodsTo);
+  }
+
+  return patched;
+}
+
 async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, cacheControl) {
   const normalizedPath = relativePath.replace(/\\/g, "/");
   const fileName = path.posix.basename(normalizedPath);
@@ -836,6 +1004,7 @@ async function sendMaybePatchedWorkBuddyAsset(req, res, archive, relativePath, c
     if (patched.includes(detailToggleExposeFrom) && !patched.includes("__workbuddyRemoteToggleDetailPanel")) {
       patched = patched.replace(detailToggleExposeFrom, detailToggleExposeTo);
     }
+    patched = patchMainIndexLongSessionLoading(patched);
   }
 
   sendVersionedScript(req, res, patched, {
@@ -1235,6 +1404,54 @@ function attachWebSocketServer(server, runtime, auth) {
           const result = shouldProtectModelSecrets
             ? modelSecretProtector.protectResult(message.method, args, rawResult)
             : rawResult;
+          runtime.sendToSocket(socket, {
+            id: message.id,
+            ok: true,
+            result,
+          });
+          return;
+        }
+
+        if (message.type === "buddy-api-call-discard-result") {
+          const bridgeUiConfig = await loadBridgeUiConfig();
+          const shouldProtectModelSecrets = bridgeUiConfig.maskBridgeModelSecrets === true;
+          const args = shouldProtectModelSecrets
+            ? modelSecretProtector.restoreArgs(message.method, message.args || [])
+            : message.args || [];
+          const result = await runtime.invokeBuddyApiDiscardResult(message.method, args);
+          runtime.sendToSocket(socket, {
+            id: message.id,
+            ok: true,
+            result,
+          });
+          return;
+        }
+
+        if (message.type === "buddy-api-call-session-page") {
+          const bridgeUiConfig = await loadBridgeUiConfig();
+          const shouldProtectModelSecrets = bridgeUiConfig.maskBridgeModelSecrets === true;
+          const args = shouldProtectModelSecrets
+            ? modelSecretProtector.restoreArgs(message.method, message.args || [])
+            : message.args || [];
+          const rawResult = await runtime.invokeBuddyApiSessionPage(message.method, args, {
+            limit: message.limit,
+          });
+          const result = shouldProtectModelSecrets
+            ? modelSecretProtector.protectResult(message.method, args, rawResult)
+            : rawResult;
+          runtime.sendToSocket(socket, {
+            id: message.id,
+            ok: true,
+            result,
+          });
+          return;
+        }
+
+        if (message.type === "workbuddy-remote-session-messages-page") {
+          const result = await runtime.getStoredSessionMessagesPage(message.sessionId, {
+            before: message.before,
+            limit: message.limit,
+          });
           runtime.sendToSocket(socket, {
             id: message.id,
             ok: true,

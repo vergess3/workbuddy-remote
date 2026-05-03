@@ -3,6 +3,8 @@ import { logger } from "./logger.mjs";
 import { parseArgs } from "./shared.mjs";
 import { startBridgeServer } from "./server/bridge-server.mjs";
 
+const activeResources = [];
+
 function hasStatusCodeSymbol(error, code) {
   if (!error || typeof error !== "object") {
     return false;
@@ -64,7 +66,8 @@ async function main() {
   installProcessGuards();
   const options = parseArgs(process.argv.slice(2));
   const runtime = new BridgeRuntime(options);
-  await startBridgeServer(runtime, options);
+  const server = await startBridgeServer(runtime, options);
+  activeResources.push(server);
   runtime.warmup().catch((error) => {
     logger.warn("bridge.warmup.error", "Bridge warmup failed", { error });
   });
