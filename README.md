@@ -1,12 +1,16 @@
 # WorkBuddy Remote New
 
-这是瘦身后的 WorkBuddy 远程桥接项目。它只做三件事：
+> 官方已经推出自己的 WorkBuddy Remote / 网页版 WorkBuddy：<https://www.codebuddy.cn/agents>。想要快速上手、少折腾的用户，优先推荐直接使用官方 WorkBuddy Remote。
+>
+> 如果你更在意本地数据留存、局域网/内网部署、可控的 API 配置，或者希望自定义界面和桥接逻辑，本项目仍然适合继续使用。
+
+这是重构后的 WorkBuddy 远程桥接项目。由于官方前端已经完成重构，本项目也从原来较重的 relay/native 镜像方案，改成直接复用官方 WebUI 的形式：
 
 1. 从桌面版 WorkBuddy 的 `resources/app.asar` 读取原版 `renderer/index.html` 和静态资源。
 2. 在网页里注入一个轻量 `buddyAPI` shim。
 3. 通过一条浏览器 WebSocket 把 `buddyAPI` 调用转发到桌面 WorkBuddy 主窗口的 CDP 目标。
 
-旧的 native 前端、VS Code IPC 镜像层、动态 MessagePort、窗口清理逻辑没有搬进来。
+和旧版相比，新的实现不再维护独立 light/native 前端、VS Code IPC 镜像层、动态 MessagePort relay 和大量窗口清理逻辑。浏览器打开的是官方 WebUI 资源，桥接层只负责补齐浏览器里缺少的原生能力，因此项目体积更小，启动路径更短，页面打开速度也明显更快。
 
 ## 目录
 

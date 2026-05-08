@@ -1,8 +1,12 @@
 # WorkBuddy Remote New
 
-This is the slim WorkBuddy remote bridge. It serves the original WorkBuddy renderer from `resources/app.asar`, injects a lightweight browser `buddyAPI` shim, and forwards calls to the desktop WorkBuddy window through CDP.
+> WorkBuddy now has an official WorkBuddy Remote / web WorkBuddy at <https://www.codebuddy.cn/agents>. If you want the fastest setup path, use the official WorkBuddy Remote first.
+>
+> This project is still useful when you prefer local or intranet deployment for data control, custom API settings, or a customizable UI and bridge layer.
 
-The old native UI, VS Code IPC mirror, dynamic MessagePort bridge, and window cleanup code are intentionally not included.
+This is the refactored WorkBuddy remote bridge. Because the official WorkBuddy frontend has been rebuilt, this project has moved away from the older heavy relay/native mirror approach and now serves the official WebUI directly from `resources/app.asar`, injects a lightweight browser `buddyAPI` shim, and forwards calls to the desktop WorkBuddy window through CDP.
+
+Compared with the old version, the standalone light/native frontend, VS Code IPC mirror, dynamic MessagePort relay, and large window cleanup layer are gone. The browser loads the official WebUI resources, while this bridge only fills in the native capabilities that a normal browser does not have. That keeps the project smaller, shortens startup, and makes the page open much faster.
 
 ## Setup
 
